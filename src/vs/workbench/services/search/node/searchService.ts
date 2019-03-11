@@ -20,15 +20,15 @@ import { IModelService } from 'vs/editor/common/services/modelService';
 import { IDebugParams, IEnvironmentService } from 'vs/platform/environment/common/environment';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
 import { ILogService } from 'vs/platform/log/common/log';
-import { deserializeSearchError, FileMatch, ICachedSearchStats, IFileMatch, IFileQuery, IFileSearchStats, IFolderQuery, IProgress, ISearchComplete, ISearchEngineStats, ISearchProgressItem, ISearchQuery, ISearchResultProvider, ISearchService, ITextQuery, pathIncludedInQuery, QueryType, SearchError, SearchErrorCode, SearchProviderType, ISearchConfiguration } from 'vs/workbench/services/search/common/search';
+import { deserializeSearchError, FileMatch, ICachedSearchStats, IFileMatch, IFileQuery, IFileSearchStats, IFolderQuery, IProgress, ISearchComplete, ISearchEngineStats, ISearchProgressItem, ISearchQuery, ISearchResultProvider, ISearchService, ITextQuery, pathIncludedInQuery, QueryType, SearchError, SearchErrorCode, SearchProviderType, ISearchConfiguration, IRawSearchService, ISerializedFileMatch, ISerializedSearchComplete, ISerializedSearchProgressItem, isSerializedSearchComplete, isSerializedSearchSuccess } from 'vs/workbench/services/search/common/search';
 import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
 import { IEditorService } from 'vs/workbench/services/editor/common/editorService';
 import { IExtensionService } from 'vs/workbench/services/extensions/common/extensions';
 import { addContextToEditorMatches, editorMatchesToTextSearchResults } from 'vs/workbench/services/search/common/searchHelpers';
 import { IUntitledEditorService } from 'vs/workbench/services/untitled/common/untitledEditorService';
-import { IRawSearchService, ISerializedFileMatch, ISerializedSearchComplete, ISerializedSearchProgressItem, isSerializedSearchComplete, isSerializedSearchSuccess } from './search';
 import { SearchChannelClient } from './searchIpc';
 import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
+import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
 
 export class SearchService extends Disposable implements ISearchService {
 	_serviceBrand: any;
@@ -36,7 +36,6 @@ export class SearchService extends Disposable implements ISearchService {
 	private diskSearch: DiskSearch;
 	private readonly fileSearchProviders = new Map<string, ISearchResultProvider>();
 	private readonly textSearchProviders = new Map<string, ISearchResultProvider>();
-	private readonly fileIndexProviders = new Map<string, ISearchResultProvider>();
 
 	constructor(
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
@@ -58,8 +57,6 @@ export class SearchService extends Disposable implements ISearchService {
 			list = this.fileSearchProviders;
 		} else if (type === SearchProviderType.text) {
 			list = this.textSearchProviders;
-		} else if (type === SearchProviderType.fileIndex) {
-			list = this.fileIndexProviders;
 		} else {
 			throw new Error('Unknown SearchProviderType');
 		}
@@ -181,7 +178,7 @@ export class SearchService extends Disposable implements ISearchService {
 		keys(fqs).forEach(scheme => {
 			const schemeFQs = fqs.get(scheme);
 			const provider = query.type === QueryType.File ?
-				this.fileSearchProviders.get(scheme) || this.fileIndexProviders.get(scheme) :
+				this.fileSearchProviders.get(scheme) :
 				this.textSearchProviders.get(scheme);
 
 			if (!provider && scheme === 'file') {
@@ -420,7 +417,6 @@ export class SearchService extends Disposable implements ISearchService {
 	clearCache(cacheKey: string): Promise<void> {
 		const clearPs = [
 			this.diskSearch,
-			...values(this.fileIndexProviders),
 			...values(this.fileSearchProviders)
 		].map(provider => provider && provider.clearCache(cacheKey));
 
@@ -586,3 +582,5 @@ export class DiskSearch implements ISearchResultProvider {
 		return this.raw.clearCache(cacheKey);
 	}
 }
+
+registerSingleton(ISearchService, SearchService, true);

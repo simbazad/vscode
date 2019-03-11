@@ -6,7 +6,7 @@
 import * as nls from 'vs/nls';
 import { URI } from 'vs/base/common/uri';
 import { toResource, IEditorCommandsContext } from 'vs/workbench/common/editor';
-import { IWindowsService, IWindowService, IURIToOpen } from 'vs/platform/windows/common/windows';
+import { IWindowsService, IWindowService, IURIToOpen, IOpenSettings } from 'vs/platform/windows/common/windows';
 import { ServicesAccessor, IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
 import { IViewletService } from 'vs/workbench/services/viewlet/browser/viewlet';
 import { IWorkspaceContextService } from 'vs/platform/workspace/common/workspace';
@@ -76,13 +76,10 @@ export const ResourceSelectedForCompareContext = new RawContextKey<boolean>('res
 export const REMOVE_ROOT_FOLDER_COMMAND_ID = 'removeRootFolder';
 export const REMOVE_ROOT_FOLDER_LABEL = nls.localize('removeFolderFromWorkspace', "Remove Folder from Workspace");
 
-export const openWindowCommand = (accessor: ServicesAccessor, input: Array<string | URI> | { urisToOpen: IURIToOpen[], forceNewWindow: boolean, forceReuseWindow?: boolean, diffMode?: boolean, addMode?: boolean }, forceNewWindow: boolean) => {
-	const windowService = accessor.get(IWindowService);
-
-	if (Array.isArray(input)) {
-		windowService.openWindow(input.map(p => ({ uri: typeof p === 'string' ? URI.file(p) : p }), { forceNewWindow }));
-	} else if (input) {
-		windowService.openWindow(input.urisToOpen, { forceNewWindow: input.forceNewWindow, diffMode: input.diffMode, addMode: input.addMode, forceReuseWindow: input.forceReuseWindow });
+export const openWindowCommand = (accessor: ServicesAccessor, urisToOpen: IURIToOpen[], options?: IOpenSettings) => {
+	if (Array.isArray(urisToOpen)) {
+		const windowService = accessor.get(IWindowService);
+		windowService.openWindow(urisToOpen, options);
 	}
 };
 
@@ -111,7 +108,7 @@ function save(
 
 		// Save As (or Save untitled with associated path)
 		if (isSaveAs || resource.scheme === Schemas.untitled) {
-			let encodingOfSource: string;
+			let encodingOfSource: string | undefined;
 			if (resource.scheme === Schemas.untitled) {
 				encodingOfSource = untitledEditorService.getEncoding(resource);
 			} else if (fileService.canHandleResource(resource)) {
@@ -119,17 +116,17 @@ function save(
 				encodingOfSource = textModel && textModel.getEncoding(); // text model can be null e.g. if this is a binary file!
 			}
 
-			let viewStateOfSource: IEditorViewState;
+			let viewStateOfSource: IEditorViewState | null;
 			const activeTextEditorWidget = getCodeEditor(editorService.activeTextEditorWidget);
 			if (activeTextEditorWidget) {
-				const activeResource = toResource(editorService.activeEditor, { supportSideBySide: true });
+				const activeResource = toResource(editorService.activeEditor || null, { supportSideBySide: true });
 				if (activeResource && (fileService.canHandleResource(activeResource) || resource.scheme === Schemas.untitled) && activeResource.toString() === resource.toString()) {
 					viewStateOfSource = activeTextEditorWidget.saveViewState();
 				}
 			}
 
 			// Special case: an untitled file with associated path gets saved directly unless "saveAs" is true
-			let savePromise: Promise<URI>;
+			let savePromise: Promise<URI | null>;
 			if (!isSaveAs && resource.scheme === Schemas.untitled && untitledEditorService.hasAssociatedFilePath(resource)) {
 				savePromise = textFileService.save(resource, options).then((result) => {
 					if (result) {
@@ -152,7 +149,7 @@ function save(
 
 			return savePromise.then((target) => {
 				if (!target || target.toString() === resource.toString()) {
-					return undefined; // save canceled or same resource used
+					return false; // save canceled or same resource used
 				}
 
 				const replacement: IResourceInput = {
@@ -160,7 +157,7 @@ function save(
 					encoding: encodingOfSource,
 					options: {
 						pinned: true,
-						viewState: viewStateOfSource
+						viewState: viewStateOfSource || undefined
 					}
 				};
 
@@ -175,7 +172,7 @@ function save(
 		// Pin the active editor if we are saving it
 		const activeControl = editorService.activeControl;
 		const activeEditorResource = activeControl && activeControl.input && activeControl.input.getResource();
-		if (activeEditorResource && activeEditorResource.toString() === resource.toString()) {
+		if (activeControl && activeEditorResource && activeEditorResource.toString() === resource.toString()) {
 			activeControl.group.pinEditor(activeControl.input);
 		}
 
@@ -203,7 +200,7 @@ function saveAll(saveAllArguments: any, editorService: IEditorService, untitledE
 					groupIdToUntitledResourceInput.set(g.id, []);
 				}
 
-				groupIdToUntitledResourceInput.get(g.id).push({
+				groupIdToUntitledResourceInput.get(g.id)!.push({
 					encoding: untitledEditorService.getEncoding(resource),
 					resource,
 					options: {
@@ -357,9 +354,9 @@ CommandsRegistry.registerCommand({
 
 function revealResourcesInOS(resources: URI[], windowsService: IWindowsService, notificationService: INotificationService, workspaceContextService: IWorkspaceContextService): void {
 	if (resources.length) {
-		sequence(resources.map(r => () => windowsService.showItemInFolder(r.fsPath)));
+		sequence(resources.map(r => () => windowsService.showItemInFolder(r)));
 	} else if (workspaceContextService.getWorkspace().folders.length) {
-		windowsService.showItemInFolder(workspaceContextService.getWorkspace().folders[0].uri.fsPath);
+		windowsService.showItemInFolder(workspaceContextService.getWorkspace().folders[0].uri);
 	} else {
 		notificationService.info(nls.localize('openFileToReveal', "Open a file first to reveal"));
 	}

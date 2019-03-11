@@ -97,8 +97,6 @@ export interface IWorkspacesMainService extends IWorkspacesService {
 
 	onUntitledWorkspaceDeleted: Event<IWorkspaceIdentifier>;
 
-	saveWorkspaceAs(workspace: IWorkspaceIdentifier, target: string): Promise<IWorkspaceIdentifier>;
-
 	createUntitledWorkspaceSync(folders?: IWorkspaceFolderCreationData[]): IWorkspaceIdentifier;
 
 	resolveLocalWorkspaceSync(path: URI): IResolvedWorkspace | null;
@@ -108,14 +106,16 @@ export interface IWorkspacesMainService extends IWorkspacesService {
 	deleteUntitledWorkspaceSync(workspace: IWorkspaceIdentifier): void;
 
 	getUntitledWorkspacesSync(): IUntitledWorkspaceInfo[];
-
-	getWorkspaceIdentifier(workspacePath: URI): IWorkspaceIdentifier;
 }
 
 export interface IWorkspacesService {
 	_serviceBrand: any;
 
 	createUntitledWorkspace(folders?: IWorkspaceFolderCreationData[], remoteAuthority?: string): Promise<IWorkspaceIdentifier>;
+
+	deleteUntitledWorkspace(workspace: IWorkspaceIdentifier): Promise<void>;
+
+	getWorkspaceIdentifier(workspacePath: URI): Promise<IWorkspaceIdentifier>;
 }
 
 export function isSingleFolderWorkspaceIdentifier(obj: any): obj is ISingleFolderWorkspaceIdentifier {
