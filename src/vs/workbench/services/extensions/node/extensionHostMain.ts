@@ -56,7 +56,7 @@ export class ExtensionHostMain {
 
 	constructor(protocol: IMessagePassingProtocol, initData: IInitData) {
 		this._isTerminating = false;
-		const uriTransformer: IURITransformer = null;
+		const uriTransformer: IURITransformer | null = null;
 		const rpcProtocol = new RPCProtocol(protocol, null, uriTransformer);
 
 		// ensure URIs are transformed and revived
@@ -117,7 +117,7 @@ export class ExtensionHostMain {
 
 	private _patchPatchedConsole(mainThreadConsole: MainThreadConsoleShape): void {
 		// The console is already patched to use `process.send()`
-		const nativeProcessSend = process.send;
+		const nativeProcessSend = process.send!;
 		process.send = (...args: any[]) => {
 			if (args.length === 0 || !args[0] || args[0].type !== '__$console') {
 				return nativeProcessSend.apply(process, args);
@@ -155,6 +155,7 @@ export class ExtensionHostMain {
 		initData.environment.extensionDevelopmentLocationURI = URI.revive(rpcProtocol.transformIncomingURIs(initData.environment.extensionDevelopmentLocationURI));
 		initData.environment.extensionTestsLocationURI = URI.revive(rpcProtocol.transformIncomingURIs(initData.environment.extensionTestsLocationURI));
 		initData.environment.globalStorageHome = URI.revive(rpcProtocol.transformIncomingURIs(initData.environment.globalStorageHome));
+		initData.environment.userHome = URI.revive(rpcProtocol.transformIncomingURIs(initData.environment.userHome));
 		initData.logsLocation = URI.revive(rpcProtocol.transformIncomingURIs(initData.logsLocation));
 		initData.workspace = rpcProtocol.transformIncomingURIs(initData.workspace);
 		return initData;

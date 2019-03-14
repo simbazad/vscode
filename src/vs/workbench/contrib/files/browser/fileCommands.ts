@@ -84,9 +84,9 @@ export const openWindowCommand = (accessor: ServicesAccessor, urisToOpen: IURITo
 };
 
 function save(
-	resource: URI,
+	resource: URI | null,
 	isSaveAs: boolean,
-	options: ISaveOptions,
+	options: ISaveOptions | undefined,
 	editorService: IEditorService,
 	fileService: IFileService,
 	untitledEditorService: IUntitledEditorService,
@@ -126,14 +126,14 @@ function save(
 			}
 
 			// Special case: an untitled file with associated path gets saved directly unless "saveAs" is true
-			let savePromise: Promise<URI | null>;
+			let savePromise: Promise<URI | undefined>;
 			if (!isSaveAs && resource.scheme === Schemas.untitled && untitledEditorService.hasAssociatedFilePath(resource)) {
 				savePromise = textFileService.save(resource, options).then((result) => {
 					if (result) {
 						return resource.with({ scheme: Schemas.file });
 					}
 
-					return null;
+					return undefined;
 				});
 			}
 
@@ -220,7 +220,7 @@ function saveAll(saveAllArguments: any, editorService: IEditorService, untitledE
 			// Update untitled resources to the saved ones, so we open the proper files
 			inputs.forEach(i => {
 				const targetResult = result.results.filter(r => r.success && r.source.toString() === i.resource.toString()).pop();
-				if (targetResult) {
+				if (targetResult && targetResult.target) {
 					i.resource = targetResult.target;
 				}
 			});
@@ -266,8 +266,8 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({
 		// Set side input
 		if (resources.length) {
 			return fileService.resolveFiles(resources.map(resource => ({ resource }))).then(resolved => {
-				const editors = resolved.filter(r => r.success && !r.stat.isDirectory).map(r => ({
-					resource: r.stat.resource
+				const editors = resolved.filter(r => r.stat && r.success && !r.stat.isDirectory).map(r => ({
+					resource: r.stat!.resource
 				}));
 
 				return editorService.openEditors(editors, SIDE_GROUP);
@@ -307,7 +307,7 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({
 	}
 });
 
-let globalResourceToCompare: URI;
+let globalResourceToCompare: URI | null;
 let resourceSelectedForCompareContext: IContextKey<boolean>;
 CommandsRegistry.registerCommand({
 	id: SELECT_FOR_COMPARE_COMMAND_ID,
@@ -345,10 +345,13 @@ CommandsRegistry.registerCommand({
 		const editorService = accessor.get(IEditorService);
 		const listService = accessor.get(IListService);
 
-		return editorService.openEditor({
-			leftResource: globalResourceToCompare,
-			rightResource: getResourceForCommand(resource, listService, editorService)
-		}).then(() => undefined);
+		const rightResource = getResourceForCommand(resource, listService, editorService);
+		if (globalResourceToCompare && rightResource) {
+			editorService.openEditor({
+				leftResource: globalResourceToCompare,
+				rightResource
+			}).then(undefined, onUnexpectedError);
+		}
 	}
 });
 
@@ -384,7 +387,8 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({
 	handler: (accessor: ServicesAccessor) => {
 		const editorService = accessor.get(IEditorService);
 		const activeInput = editorService.activeEditor;
-		const resources = activeInput && activeInput.getResource() ? [activeInput.getResource()] : [];
+		const resource = activeInput ? activeInput.getResource() : null;
+		const resources = resource ? [resource] : [];
 		revealResourcesInOS(resources, accessor.get(IWindowsService), accessor.get(INotificationService), accessor.get(IWorkspaceContextService));
 	}
 });
@@ -437,7 +441,8 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({
 	handler: (accessor) => {
 		const editorService = accessor.get(IEditorService);
 		const activeInput = editorService.activeEditor;
-		const resources = activeInput && activeInput.getResource() ? [activeInput.getResource()] : [];
+		const resource = activeInput ? activeInput.getResource() : null;
+		const resources = resource ? [resource] : [];
 		resourcesToClipboard(resources, false, accessor.get(IClipboardService), accessor.get(INotificationService), accessor.get(ILabelService));
 	}
 });
@@ -451,8 +456,7 @@ CommandsRegistry.registerCommand({
 		const uri = getResourceForCommand(resource, accessor.get(IListService), accessor.get(IEditorService));
 
 		viewletService.openViewlet(VIEWLET_ID, false).then((viewlet: ExplorerViewlet) => {
-			const isInsideWorkspace = contextService.isInsideWorkspace(uri);
-			if (isInsideWorkspace) {
+			if (uri && contextService.isInsideWorkspace(uri)) {
 				const explorerView = viewlet.getExplorerView();
 				if (explorerView) {
 					explorerView.setExpanded(true);
@@ -476,7 +480,7 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({
 	primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KEY_S,
 	handler: (accessor, resourceOrObject: URI | object | { from: string }) => {
 		const editorService = accessor.get(IEditorService);
-		let resource: URI | undefined = undefined;
+		let resource: URI | null = null;
 		if (resourceOrObject && 'from' in resourceOrObject && resourceOrObject.from === 'menu') {
 			resource = toResource(editorService.activeEditor);
 		} else {
@@ -542,12 +546,14 @@ CommandsRegistry.registerCommand({
 			saveAllArg = [];
 			contexts.forEach(context => {
 				const editorGroup = editorGroupService.getGroup(context.groupId);
-				editorGroup.editors.forEach(editor => {
-					const resource = toResource(editor, { supportSideBySide: true });
-					if (resource && (resource.scheme === Schemas.untitled || fileService.canHandleResource(resource))) {
-						saveAllArg.push(resource);
-					}
-				});
+				if (editorGroup) {
+					editorGroup.editors.forEach(editor => {
+						const resource = toResource(editor, { supportSideBySide: true });
+						if (resource && (resource.scheme === Schemas.untitled || fileService.canHandleResource(resource))) {
+							saveAllArg.push(resource);
+						}
+					});
+				}
 			});
 		}
 

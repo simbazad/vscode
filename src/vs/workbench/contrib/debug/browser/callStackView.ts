@@ -15,15 +15,13 @@ import { MenuId, IMenu, IMenuService } from 'vs/platform/actions/common/actions'
 import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
 import { renderViewTree } from 'vs/workbench/contrib/debug/browser/baseDebugView';
 import { IAction } from 'vs/base/common/actions';
-import { RestartAction, StopAction, ContinueAction, StepOverAction, StepIntoAction, StepOutAction, PauseAction, RestartFrameAction, TerminateThreadAction } from 'vs/workbench/contrib/debug/browser/debugActions';
-import { CopyStackTraceAction } from 'vs/workbench/contrib/debug/electron-browser/electronDebugActions';
+import { RestartAction, StopAction, ContinueAction, StepOverAction, StepIntoAction, StepOutAction, PauseAction, RestartFrameAction, TerminateThreadAction, CopyStackTraceAction } from 'vs/workbench/contrib/debug/browser/debugActions';
 import { IEditorService } from 'vs/workbench/services/editor/common/editorService';
 import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
 import { Separator } from 'vs/base/browser/ui/actionbar/actionbar';
 import { IContextKey, IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
 import { IViewletPanelOptions, ViewletPanel } from 'vs/workbench/browser/parts/views/panelViewlet';
 import { ILabelService } from 'vs/platform/label/common/label';
-import { DebugSession } from 'vs/workbench/contrib/debug/electron-browser/debugSession';
 import { IAccessibilityProvider } from 'vs/base/browser/ui/list/listWidget';
 import { fillInContextMenuActions } from 'vs/platform/actions/browser/menuItemActionItem';
 import { IListVirtualDelegate } from 'vs/base/browser/ui/list/list';
@@ -48,7 +46,7 @@ export class CallStackView extends ViewletPanel {
 	private ignoreFocusStackFrameEvent: boolean;
 	private callStackItemType: IContextKey<string>;
 	private dataSource: CallStackDataSource;
-	private tree: WorkbenchAsyncDataTree<IDebugModel, CallStackItem, FuzzyScore>;
+	private tree: WorkbenchAsyncDataTree<string | IStackFrame | IThread | IDebugSession | ThreadAndSessionIds | IDebugModel | IStackFrame[], CallStackItem, FuzzyScore>;
 	private contributedContextMenu: IMenu;
 
 	constructor(
@@ -129,7 +127,7 @@ export class CallStackView extends ViewletPanel {
 				},
 				keyboardNavigationLabelProvider: {
 					getKeyboardNavigationLabel: e => {
-						if (e instanceof DebugSession) {
+						if (isDebugSession(e)) {
 							return e.getLabel();
 						}
 						if (e instanceof Thread) {
@@ -156,7 +154,7 @@ export class CallStackView extends ViewletPanel {
 				return;
 			}
 
-			const focusStackFrame = (stackFrame: IStackFrame, thread: IThread, session: IDebugSession) => {
+			const focusStackFrame = (stackFrame: IStackFrame | undefined, thread: IThread | undefined, session: IDebugSession) => {
 				this.ignoreFocusStackFrameEvent = true;
 				try {
 					this.debugService.focusStackFrame(stackFrame, thread, session, true);
@@ -173,7 +171,7 @@ export class CallStackView extends ViewletPanel {
 			if (element instanceof Thread) {
 				focusStackFrame(undefined, element, element.session);
 			}
-			if (element instanceof DebugSession) {
+			if (isDebugSession(element)) {
 				focusStackFrame(undefined, undefined, element);
 			}
 			if (element instanceof ThreadAndSessionIds) {
@@ -271,7 +269,7 @@ export class CallStackView extends ViewletPanel {
 	private onContextMenu(e: ITreeContextMenuEvent<CallStackItem>): void {
 		const actions: IAction[] = [];
 		const element = e.element;
-		if (element instanceof DebugSession) {
+		if (isDebugSession(element)) {
 			this.callStackItemType.set('session');
 			actions.push(this.instantiationService.createInstance(RestartAction, RestartAction.ID, RestartAction.LABEL));
 			actions.push(new StopAction(StopAction.ID, StopAction.LABEL, this.debugService, this.keybindingService));
@@ -294,7 +292,7 @@ export class CallStackView extends ViewletPanel {
 			if (element.thread.session.capabilities.supportsRestartFrame) {
 				actions.push(new RestartFrameAction(RestartFrameAction.ID, RestartFrameAction.LABEL, this.debugService, this.keybindingService));
 			}
-			actions.push(new CopyStackTraceAction(CopyStackTraceAction.ID, CopyStackTraceAction.LABEL));
+			actions.push(this.instantiationService.createInstance(CopyStackTraceAction, CopyStackTraceAction.ID, CopyStackTraceAction.LABEL));
 		} else {
 			this.callStackItemType.reset();
 		}
@@ -309,7 +307,7 @@ export class CallStackView extends ViewletPanel {
 		});
 	}
 
-	private getContextForContributedActions(element: CallStackItem): string | number {
+	private getContextForContributedActions(element: CallStackItem | null): string | number | undefined {
 		if (element instanceof StackFrame) {
 			if (element.source.inMemory) {
 				return element.source.raw.path || element.source.reference;
@@ -548,7 +546,7 @@ class CallStackDelegate implements IListVirtualDelegate<CallStackItem> {
 	}
 
 	getTemplateId(element: CallStackItem): string {
-		if (element instanceof DebugSession) {
+		if (isDebugSession(element)) {
 			return SessionsRenderer.ID;
 		}
 		if (element instanceof Thread) {
@@ -563,16 +561,18 @@ class CallStackDelegate implements IListVirtualDelegate<CallStackItem> {
 		if (element instanceof ThreadAndSessionIds) {
 			return LoadMoreRenderer.ID;
 		}
-		if (element instanceof Array) {
-			return ShowMoreRenderer.ID;
-		}
 
-		return undefined;
+		// element instanceof Array
+		return ShowMoreRenderer.ID;
 	}
 }
 
 function isDebugModel(obj: any): obj is IDebugModel {
 	return typeof obj.getSessions === 'function';
+}
+
+function isDebugSession(obj: any): obj is IDebugSession {
+	return typeof obj.getAllThreads === 'function';
 }
 
 function isDeemphasized(frame: IStackFrame): boolean {
@@ -583,7 +583,7 @@ class CallStackDataSource implements IAsyncDataSource<IDebugModel, CallStackItem
 	deemphasizedStackFramesToShow: IStackFrame[];
 
 	hasChildren(element: IDebugModel | CallStackItem): boolean {
-		return isDebugModel(element) || element instanceof DebugSession || (element instanceof Thread && element.stopped);
+		return isDebugModel(element) || isDebugSession(element) || (element instanceof Thread && element.stopped);
 	}
 
 	getChildren(element: IDebugModel | CallStackItem): Promise<CallStackItem[]> {
@@ -599,25 +599,28 @@ class CallStackDataSource implements IAsyncDataSource<IDebugModel, CallStackItem
 			const threads = sessions[0].getAllThreads();
 			// Only show the threads in the call stack if there is more than 1 thread.
 			return threads.length === 1 ? this.getThreadChildren(<Thread>threads[0]) : Promise.resolve(threads);
-		} else if (element instanceof DebugSession) {
+		} else if (isDebugSession(element)) {
 			return Promise.resolve(element.getAllThreads());
 		} else {
 			return this.getThreadChildren(<Thread>element);
 		}
 	}
 
-	private getThreadChildren(thread: Thread): Promise<Array<IStackFrame | string | ThreadAndSessionIds>> {
+	private getThreadChildren(thread: Thread): Promise<CallStackItem[]> {
 		return this.getThreadCallstack(thread).then(children => {
 			// Check if some stack frames should be hidden under a parent element since they are deemphasized
-			const result = [];
+			const result: CallStackItem[] = [];
 			children.forEach((child, index) => {
 				if (child instanceof StackFrame && child.source && isDeemphasized(child)) {
 					// Check if the user clicked to show the deemphasized source
 					if (this.deemphasizedStackFramesToShow.indexOf(child) === -1) {
-						if (result.length && result[result.length - 1] instanceof Array) {
-							// Collect all the stackframes that will be "collapsed"
-							result[result.length - 1].push(child);
-							return;
+						if (result.length) {
+							const last = result[result.length - 1];
+							if (last instanceof Array) {
+								// Collect all the stackframes that will be "collapsed"
+								last.push(child);
+								return;
+							}
 						}
 
 						const nextChild = index < children.length - 1 ? children[index + 1] : undefined;
@@ -644,7 +647,7 @@ class CallStackDataSource implements IAsyncDataSource<IDebugModel, CallStackItem
 		}
 
 		return callStackPromise.then(() => {
-			if (callStack.length === 1 && thread.session.capabilities.supportsDelayedStackTraceLoading && thread.stoppedDetails && thread.stoppedDetails.totalFrames > 1) {
+			if (callStack.length === 1 && thread.session.capabilities.supportsDelayedStackTraceLoading && thread.stoppedDetails && thread.stoppedDetails.totalFrames && thread.stoppedDetails.totalFrames > 1) {
 				// To reduce flashing of the call stack view simply append the stale call stack
 				// once we have the correct data the tree will refresh and we will no longer display it.
 				callStack = callStack.concat(thread.getStaleCallStack().slice(1));
@@ -653,7 +656,7 @@ class CallStackDataSource implements IAsyncDataSource<IDebugModel, CallStackItem
 			if (thread.stoppedDetails && thread.stoppedDetails.framesErrorMessage) {
 				callStack = callStack.concat([thread.stoppedDetails.framesErrorMessage]);
 			}
-			if (thread.stoppedDetails && thread.stoppedDetails.totalFrames > callStack.length && callStack.length > 1) {
+			if (thread.stoppedDetails && thread.stoppedDetails.totalFrames && thread.stoppedDetails.totalFrames > callStack.length && callStack.length > 1) {
 				callStack = callStack.concat([new ThreadAndSessionIds(thread.session.getId(), thread.threadId)]);
 			}
 
@@ -670,19 +673,17 @@ class CallStackAccessibilityProvider implements IAccessibilityProvider<CallStack
 		if (element instanceof StackFrame) {
 			return nls.localize('stackFrameAriaLabel', "Stack Frame {0} line {1} {2}, callstack, debug", element.name, element.range.startLineNumber, element.getSpecificSourceName());
 		}
-		if (element instanceof DebugSession) {
+		if (isDebugSession(element)) {
 			return nls.localize('sessionLabel', "Debug Session {0}", element.getLabel());
 		}
 		if (typeof element === 'string') {
 			return element;
 		}
-		if (element instanceof ThreadAndSessionIds) {
-			return nls.localize('loadMoreStackFrames', "Load More Stack Frames");
-		}
 		if (element instanceof Array) {
 			return nls.localize('showMoreStackFrames', "Show {0} More Stack Frames", element.length);
 		}
 
-		return null;
+		// element instanceof ThreadAndSessionIds
+		return nls.localize('loadMoreStackFrames', "Load More Stack Frames");
 	}
 }

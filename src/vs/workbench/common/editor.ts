@@ -142,7 +142,7 @@ export interface IEditorControl extends ICompositeControl { }
 
 export interface IFileInputFactory {
 
-	createFileInput(resource: URI, encoding: string, instantiationService: IInstantiationService): IFileEditorInput;
+	createFileInput(resource: URI, encoding: string | undefined, instantiationService: IInstantiationService): IFileEditorInput;
 
 	isFileInput(obj: any): obj is IFileEditorInput;
 }
@@ -570,6 +570,7 @@ export class SideBySideEditorInput extends EditorInput {
 
 	getTelemetryDescriptor(): object {
 		const descriptor = this.master.getTelemetryDescriptor();
+
 		return objects.assign(descriptor, super.getTelemetryDescriptor());
 	}
 
@@ -983,7 +984,7 @@ export interface IResourceOptions {
 	filter?: string | string[];
 }
 
-export function toResource(editor: IEditorInput | null, options?: IResourceOptions): URI | null {
+export function toResource(editor: IEditorInput | null | undefined, options?: IResourceOptions): URI | null {
 	if (!editor) {
 		return null;
 	}

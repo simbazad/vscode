@@ -110,7 +110,7 @@ import 'vs/workbench/services/progress/browser/progressService2';
 import 'vs/workbench/services/editor/browser/codeEditorService';
 // import 'vs/workbench/services/broadcast/electron-browser/broadcastService';
 import 'vs/workbench/services/preferences/browser/preferencesService';
-// import 'vs/workbench/services/output/node/outputChannelModelService';
+import 'vs/workbench/services/output/common/outputChannelModelService';
 // import 'vs/workbench/services/configuration/node/jsonEditingService';
 import 'vs/workbench/services/textmodelResolver/common/textModelResolverService';
 import 'vs/workbench/services/textfile/common/textFileService';
@@ -225,7 +225,8 @@ import 'vs/workbench/contrib/scm/browser/scmViewlet';
 // Debug
 // import 'vs/workbench/contrib/debug/electron-browser/debug.contribution';
 // import 'vs/workbench/contrib/debug/browser/debugQuickOpen';
-// import 'vs/workbench/contrib/debug/electron-browser/repl';
+// import 'vs/workbench/contrib/debug/browser/debugEditorContribution';
+// import 'vs/workbench/contrib/debug/browser/repl';
 // import 'vs/workbench/contrib/debug/browser/debugViewlet';
 
 // Markers

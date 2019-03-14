@@ -25,7 +25,6 @@ import { IInstantiationService, createDecorator } from 'vs/platform/instantiatio
 import { IStorageService, StorageScope } from 'vs/platform/storage/common/storage';
 import { Panel } from 'vs/workbench/browser/panel';
 import { IThemeService } from 'vs/platform/theme/common/themeService';
-import { clipboard } from 'electron';
 import { ICodeEditor } from 'vs/editor/browser/editorBrowser';
 import { memoize } from 'vs/base/common/decorators';
 import { dispose, IDisposable } from 'vs/base/common/lifecycle';
@@ -47,15 +46,13 @@ import { IPanelService } from 'vs/workbench/services/panel/common/panelService';
 import { IAccessibilityProvider } from 'vs/base/browser/ui/list/listWidget';
 import { Variable, Expression, SimpleReplElement, RawObjectReplElement } from 'vs/workbench/contrib/debug/common/debugModel';
 import { IListVirtualDelegate } from 'vs/base/browser/ui/list/list';
-import { VariablesRenderer } from 'vs/workbench/contrib/debug/electron-browser/variablesView';
 import { ITreeRenderer, ITreeNode, ITreeContextMenuEvent, IAsyncDataSource } from 'vs/base/browser/ui/tree/tree';
 import { IEditorService } from 'vs/workbench/services/editor/common/editorService';
 import { renderExpressionValue } from 'vs/workbench/contrib/debug/browser/baseDebugView';
 import { handleANSIOutput } from 'vs/workbench/contrib/debug/browser/debugANSIHandling';
 import { ILabelService } from 'vs/platform/label/common/label';
 import { LinkDetector } from 'vs/workbench/contrib/debug/browser/linkDetector';
-import { CopyAction } from 'vs/workbench/contrib/debug/electron-browser/electronDebugActions';
-import { ReplCollapseAllAction } from 'vs/workbench/contrib/debug/browser/debugActions';
+import { ReplCollapseAllAction, CopyAction } from 'vs/workbench/contrib/debug/browser/debugActions';
 import { Separator } from 'vs/base/browser/ui/actionbar/actionbar';
 import { IContextMenuService } from 'vs/platform/contextview/browser/contextView';
 import { removeAnsiEscapeCodes } from 'vs/base/common/strings';
@@ -66,6 +63,8 @@ import { RunOnceScheduler } from 'vs/base/common/async';
 import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
 import { FuzzyScore, createMatches } from 'vs/base/common/filters';
 import { HighlightedLabel } from 'vs/base/browser/ui/highlightedlabel/highlightedLabel';
+import { IClipboardService } from 'vs/platform/clipboard/common/clipboardService';
+import { VariablesRenderer } from 'vs/workbench/contrib/debug/browser/variablesView';
 
 const $ = dom.$;
 
@@ -120,7 +119,8 @@ export class Repl extends Panel implements IPrivateReplService, IHistoryNavigati
 		@IListService private readonly listService: IListService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@ITextResourcePropertiesService private readonly textResourcePropertiesService: ITextResourcePropertiesService,
-		@IKeybindingService private readonly keybindingService: IKeybindingService
+		@IKeybindingService private readonly keybindingService: IKeybindingService,
+		@IClipboardService private readonly clipboardService: IClipboardService
 	) {
 		super(REPL_ID, telemetryService, themeService, storageService);
 
@@ -132,7 +132,9 @@ export class Repl extends Panel implements IPrivateReplService, IHistoryNavigati
 
 	private registerListeners(): void {
 		this._register(this.debugService.getViewModel().onDidFocusSession(session => {
-			sessionsToIgnore.delete(session);
+			if (session) {
+				sessionsToIgnore.delete(session);
+			}
 			this.selectSession();
 		}));
 		this._register(this.debugService.onWillNewSession(() => {
@@ -222,13 +224,14 @@ export class Repl extends Panel implements IPrivateReplService, IHistoryNavigati
 	}
 
 	selectSession(session?: IDebugSession): void {
+		const treeInput = this.tree.getInput();
 		if (!session) {
 			const focusedSession = this.debugService.getViewModel().focusedSession;
 			// If there is a focusedSession focus on that one, otherwise just show any other not ignored session
 			if (focusedSession) {
 				session = focusedSession;
-			} else if (!this.tree.getInput() || sessionsToIgnore.has(this.tree.getInput())) {
-				session = first(this.debugService.getModel().getSessions(true), s => !sessionsToIgnore.has(s));
+			} else if (!treeInput || sessionsToIgnore.has(treeInput)) {
+				session = first(this.debugService.getModel().getSessions(true), s => !sessionsToIgnore.has(s)) || undefined;
 			}
 		}
 		if (session) {
@@ -236,10 +239,10 @@ export class Repl extends Panel implements IPrivateReplService, IHistoryNavigati
 				this.replElementsChangeListener.dispose();
 			}
 			this.replElementsChangeListener = session.onDidChangeReplElements(() => {
-				this.refreshReplElements(session.getReplElements().length === 0);
+				this.refreshReplElements(session!.getReplElements().length === 0);
 			});
 
-			if (this.tree && this.tree.getInput() !== session) {
+			if (this.tree && treeInput !== session) {
 				this.tree.setInput(session).then(() => revealLastElement(this.tree)).then(undefined, errors.onUnexpectedError);
 			}
 		}
@@ -310,12 +313,12 @@ export class Repl extends Panel implements IPrivateReplService, IHistoryNavigati
 		this.replInput.focus();
 	}
 
-	getActionItem(action: IAction): IActionItem {
+	getActionItem(action: IAction): IActionItem | null {
 		if (action.id === SelectReplAction.ID) {
 			return this.instantiationService.createInstance(SelectReplActionItem, this.selectReplAction);
 		}
 
-		return undefined;
+		return null;
 	}
 
 	getActions(): IAction[] {
@@ -366,7 +369,7 @@ export class Repl extends Panel implements IPrivateReplService, IHistoryNavigati
 		this.createReplInput(this.container);
 
 		this.replDelegate = new ReplDelegate(this.configurationService);
-		this.tree = new WorkbenchAsyncDataTree(treeContainer, this.replDelegate, [
+		this.tree = new WorkbenchAsyncDataTree<IDebugSession, IReplElement, FuzzyScore>(treeContainer, this.replDelegate, [
 			this.instantiationService.createInstance(VariablesRenderer),
 			this.instantiationService.createInstance(ReplSimpleElementsRenderer),
 			new ReplExpressionsRenderer(),
@@ -412,17 +415,20 @@ export class Repl extends Panel implements IPrivateReplService, IHistoryNavigati
 				const focusedSession = this.debugService.getViewModel().focusedSession;
 				if (focusedSession && focusedSession.capabilities.supportsCompletionsRequest) {
 
-					const word = this.replInput.getModel().getWordAtPosition(position);
-					const overwriteBefore = word ? word.word.length : 0;
-					const text = this.replInput.getModel().getLineContent(position.lineNumber);
-					const focusedStackFrame = this.debugService.getViewModel().focusedStackFrame;
-					const frameId = focusedStackFrame ? focusedStackFrame.frameId : undefined;
+					const model = this.replInput.getModel();
+					if (model) {
+						const word = model.getWordAtPosition(position);
+						const overwriteBefore = word ? word.word.length : 0;
+						const text = model.getLineContent(position.lineNumber);
+						const focusedStackFrame = this.debugService.getViewModel().focusedStackFrame;
+						const frameId = focusedStackFrame ? focusedStackFrame.frameId : undefined;
 
-					return focusedSession.completions(frameId, text, position, overwriteBefore).then(suggestions => {
-						return { suggestions };
-					}, err => {
-						return { suggestions: [] };
-					});
+						return focusedSession.completions(frameId, text, position, overwriteBefore).then(suggestions => {
+							return { suggestions };
+						}, err => {
+							return { suggestions: [] };
+						});
+					}
 				}
 				return Promise.resolve({ suggestions: [] });
 			}
@@ -436,7 +442,8 @@ export class Repl extends Panel implements IPrivateReplService, IHistoryNavigati
 			this.layout(this.dimension);
 		}));
 		this._register(this.replInput.onDidChangeModelContent(() => {
-			this.historyNavigationEnablement.set(this.replInput.getModel().getValue() === '');
+			const model = this.replInput.getModel();
+			this.historyNavigationEnablement.set(!!model && model.getValue() === '');
 		}));
 		// We add the input decoration only when the focus is in the input #61126
 		this._register(this.replInput.onDidFocusEditorText(() => this.updateInputDecoration()));
@@ -448,9 +455,9 @@ export class Repl extends Panel implements IPrivateReplService, IHistoryNavigati
 
 	private onContextMenu(e: ITreeContextMenuEvent<IReplElement>): void {
 		const actions: IAction[] = [];
-		actions.push(new CopyAction(CopyAction.ID, CopyAction.LABEL));
+		actions.push(new CopyAction(CopyAction.ID, CopyAction.LABEL, this.clipboardService));
 		actions.push(new Action('workbench.debug.action.copyAll', nls.localize('copyAll', "Copy All"), undefined, true, () => {
-			clipboard.writeText(this.getVisibleContent());
+			this.clipboardService.writeText(this.getVisibleContent());
 			return Promise.resolve(undefined);
 		}));
 		actions.push(new ReplCollapseAllAction(this.tree, this.replInput));
@@ -483,6 +490,7 @@ export class Repl extends Panel implements IPrivateReplService, IHistoryNavigati
 
 		const decorations: IDecorationOptions[] = [];
 		if (this.isReadonly && this.replInput.hasTextFocus() && !this.replInput.getValue()) {
+			const transparentForeground = transparent(editorForeground, 0.4)(this.themeService.getTheme());
 			decorations.push({
 				range: {
 					startLineNumber: 0,
@@ -493,7 +501,7 @@ export class Repl extends Panel implements IPrivateReplService, IHistoryNavigati
 				renderOptions: {
 					after: {
 						contentText: nls.localize('startDebugFirst', "Please start a debug session to evaluate expressions"),
-						color: transparent(editorForeground, 0.4)(this.themeService.getTheme()).toString()
+						color: transparentForeground ? transparentForeground.toString() : undefined
 					}
 				}
 			});
@@ -536,7 +544,7 @@ interface ISimpleReplElementTemplateData {
 	container: HTMLElement;
 	value: HTMLElement;
 	source: HTMLElement;
-	getReplElementSource(): IReplElementSource;
+	getReplElementSource(): IReplElementSource | undefined;
 	toDispose: IDisposable[];
 }
 
@@ -724,11 +732,8 @@ class ReplDelegate implements IListVirtualDelegate<IReplElement> {
 			// Variable with no name is a top level variable which should be rendered like a repl element #17404
 			return ReplSimpleElementsRenderer.ID;
 		}
-		if (element instanceof RawObjectReplElement) {
-			return ReplRawObjectsRenderer.ID;
-		}
 
-		return undefined;
+		return ReplRawObjectsRenderer.ID;
 	}
 
 	hasDynamicHeight?(element: IReplElement): boolean {
@@ -777,7 +782,7 @@ class ReplAccessibilityProvider implements IAccessibilityProvider<IReplElement> 
 			return nls.localize('replRawObjectAriaLabel', "Repl variable {0} has value {1}, read eval print loop, debug", element.name, element.value);
 		}
 
-		return null;
+		return '';
 	}
 }
 
@@ -818,7 +823,8 @@ class ReplCopyAllAction extends EditorAction {
 	}
 
 	run(accessor: ServicesAccessor, editor: ICodeEditor): void | Promise<void> {
-		clipboard.writeText(accessor.get(IPrivateReplService).getVisibleContent());
+		const clipboardService = accessor.get(IClipboardService);
+		clipboardService.writeText(accessor.get(IPrivateReplService).getVisibleContent());
 	}
 }
 

@@ -14,8 +14,7 @@ import { IContextMenuService } from 'vs/platform/contextview/browser/contextView
 import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
 import { renderViewTree, renderVariable, IInputBoxOptions, AbstractExpressionsRenderer, IExpressionTemplateData } from 'vs/workbench/contrib/debug/browser/baseDebugView';
 import { IAction } from 'vs/base/common/actions';
-import { SetValueAction, AddToWatchExpressionsAction } from 'vs/workbench/contrib/debug/browser/debugActions';
-import { CopyValueAction, CopyEvaluatePathAction } from 'vs/workbench/contrib/debug/electron-browser/electronDebugActions';
+import { SetValueAction, AddToWatchExpressionsAction, CopyValueAction, CopyEvaluatePathAction } from 'vs/workbench/contrib/debug/browser/debugActions';
 import { Separator } from 'vs/base/browser/ui/actionbar/actionbar';
 import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
 import { IViewletPanelOptions, ViewletPanel } from 'vs/workbench/browser/parts/views/panelViewlet';
@@ -39,7 +38,7 @@ export class VariablesView extends ViewletPanel {
 
 	private onFocusStackFrameScheduler: RunOnceScheduler;
 	private needsRefresh: boolean;
-	private tree: WorkbenchAsyncDataTree<IViewModel, IExpression | IScope, FuzzyScore>;
+	private tree: WorkbenchAsyncDataTree<IViewModel | IExpression | IScope, IExpression | IScope, FuzzyScore>;
 
 	constructor(
 		options: IViewletViewOptions,
@@ -136,18 +135,17 @@ export class VariablesView extends ViewletPanel {
 
 	private onContextMenu(e: ITreeContextMenuEvent<IExpression | IScope>): void {
 		const element = e.element;
-		const anchor = e.anchor;
-		if (element instanceof Variable && !!element.value && anchor) {
+		if (element instanceof Variable && !!element.value) {
 			const actions: IAction[] = [];
 			const variable = element as Variable;
 			actions.push(new SetValueAction(SetValueAction.ID, SetValueAction.LABEL, variable, this.debugService, this.keybindingService));
-			actions.push(new CopyValueAction(CopyValueAction.ID, CopyValueAction.LABEL, variable, 'variables', this.debugService));
-			actions.push(new CopyEvaluatePathAction(CopyEvaluatePathAction.ID, CopyEvaluatePathAction.LABEL, variable));
+			actions.push(this.instantiationService.createInstance(CopyValueAction, CopyValueAction.ID, CopyValueAction.LABEL, variable, 'variables'));
+			actions.push(this.instantiationService.createInstance(CopyEvaluatePathAction, CopyEvaluatePathAction.ID, CopyEvaluatePathAction.LABEL, variable));
 			actions.push(new Separator());
 			actions.push(new AddToWatchExpressionsAction(AddToWatchExpressionsAction.ID, AddToWatchExpressionsAction.LABEL, variable, this.debugService, this.keybindingService));
 
 			this.contextMenuService.showContextMenu({
-				getAnchor: () => anchor,
+				getAnchor: () => e.anchor,
 				getActions: () => actions,
 				getActionsContext: () => element
 			});

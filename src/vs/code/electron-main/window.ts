@@ -25,6 +25,7 @@ import * as perf from 'vs/base/common/performance';
 import { resolveMarketplaceHeaders } from 'vs/platform/extensionManagement/node/extensionGalleryService';
 import { getBackgroundColor } from 'vs/code/electron-main/theme';
 import { RunOnceScheduler } from 'vs/base/common/async';
+import { withNullAsUndefined } from 'vs/base/common/types';
 
 export interface IWindowCreationOptions {
 	state: IWindowState;
@@ -312,7 +313,11 @@ export class CodeWindow extends Disposable implements ICodeWindow {
 		const urls = ['https://marketplace.visualstudio.com/*', 'https://*.vsassets.io/*'];
 		this._win.webContents.session.webRequest.onBeforeSendHeaders({ urls }, (details: any, cb: any) => {
 			this.marketplaceHeadersPromise.then(headers => {
-				cb({ cancel: false, requestHeaders: objects.assign(details.requestHeaders, headers) });
+				const requestHeaders = objects.assign(details.requestHeaders, headers);
+				if (this.configurationService.getValue('extensions.enableExperimentalAzureSearch')) {
+					requestHeaders['Cookie'] = `${requestHeaders['Cookie'] ? requestHeaders['Cookie'] + ';' : ''}EnableExternalSearchForVSCode=true`;
+				}
+				cb({ cancel: false, requestHeaders });
 			});
 		});
 	}
@@ -699,7 +704,7 @@ export class CodeWindow extends Disposable implements ICodeWindow {
 	private restoreWindowState(state?: IWindowState): IWindowState {
 		if (state) {
 			try {
-				state = this.validateWindowState(state) || undefined;
+				state = withNullAsUndefined(this.validateWindowState(state));
 			} catch (err) {
 				this.logService.warn(`Unexpected error validating window state: ${err}\n${err.stack}`); // somehow display API can be picky about the state to validate
 			}
