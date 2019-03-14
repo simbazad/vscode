@@ -247,14 +247,6 @@ export class DiagnosticsService implements IDiagnosticsService {
 			output.push(line);
 		}
 
-		if (workspaceStats.launchConfigFiles.length > 0) {
-			let line = '|      Launch Configs:';
-			workspaceStats.launchConfigFiles.forEach(each => {
-				const item = each.count > 1 ? ` ${each.name}(${each.count})` : ` ${each.name}`;
-				line += item;
-			});
-			output.push(line);
-		}
 		return output.join('\n');
 	}
 

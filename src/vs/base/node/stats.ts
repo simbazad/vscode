@@ -17,7 +17,6 @@ export interface WorkspaceStats {
 	configFiles: WorkspaceStatItem[];
 	fileCount: number;
 	maxFilesReached: boolean;
-	launchConfigFiles: WorkspaceStatItem[];
 }
 
 function asSortedItems(map: Map<string, number>): WorkspaceStatItem[] {
@@ -67,7 +66,7 @@ export function collectLaunchConfigs(folder: string): Promise<WorkspaceStatItem[
 	});
 }
 
-export async function collectWorkspaceStats(folder: string, filter: string[]): Promise<WorkspaceStats> {
+export function collectWorkspaceStats(folder: string, filter: string[]): Promise<WorkspaceStats> {
 	const configFilePatterns = [
 		{ 'tag': 'grunt.js', 'pattern': /^gruntfile\.js$/i },
 		{ 'tag': 'gulp.js', 'pattern': /^gulpfile\.js$/i },
@@ -183,17 +182,15 @@ export async function collectWorkspaceStats(folder: string, filter: string[]): P
 	let token: { count: number, maxReached: boolean } = { count: 0, maxReached: false };
 
 	return new Promise((resolve, reject) => {
-		walk(folder, filter, token, async (files) => {
+		walk(folder, filter, token, (files) => {
 			files.forEach(acceptFile);
-
-			let launchConfigs = await collectLaunchConfigs(folder);
 
 			resolve({
 				configFiles: asSortedItems(configFiles),
 				fileTypes: asSortedItems(fileTypes),
 				fileCount: token.count,
-				maxFilesReached: token.maxReached,
-				launchConfigFiles: launchConfigs
+				maxFilesReached: token.maxReached
+
 			});
 		});
 	});
