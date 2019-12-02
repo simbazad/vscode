@@ -10,33 +10,35 @@ import { CollapseAction } from 'vs/workbench/browser/viewlet';
 import { IViewletViewOptions } from 'vs/workbench/browser/parts/views/viewsViewlet';
 import { IDebugService, IExpression, CONTEXT_WATCH_EXPRESSIONS_FOCUSED } from 'vs/workbench/contrib/debug/common/debug';
 import { Expression, Variable } from 'vs/workbench/contrib/debug/common/debugModel';
-import { AddWatchExpressionAction, RemoveAllWatchExpressionsAction, EditWatchExpressionAction, RemoveWatchExpressionAction, CopyValueAction } from 'vs/workbench/contrib/debug/browser/debugActions';
+import { AddWatchExpressionAction, RemoveAllWatchExpressionsAction, CopyValueAction } from 'vs/workbench/contrib/debug/browser/debugActions';
 import { IContextMenuService } from 'vs/platform/contextview/browser/contextView';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
 import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
-import { IAction } from 'vs/base/common/actions';
+import { IAction, Action } from 'vs/base/common/actions';
 import { Separator } from 'vs/base/browser/ui/actionbar/actionbar';
 import { renderExpressionValue, renderViewTree, IInputBoxOptions, AbstractExpressionsRenderer, IExpressionTemplateData } from 'vs/workbench/contrib/debug/browser/baseDebugView';
 import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
-import { IViewletPanelOptions, ViewletPanel } from 'vs/workbench/browser/parts/views/panelViewlet';
+import { IViewletPaneOptions, ViewletPane } from 'vs/workbench/browser/parts/views/paneViewlet';
 import { IListVirtualDelegate } from 'vs/base/browser/ui/list/list';
 import { IAccessibilityProvider } from 'vs/base/browser/ui/list/listWidget';
 import { WorkbenchAsyncDataTree } from 'vs/platform/list/browser/listService';
 import { IAsyncDataSource, ITreeMouseEvent, ITreeContextMenuEvent, ITreeDragAndDrop, ITreeDragOverReaction } from 'vs/base/browser/ui/tree/tree';
 import { IDragAndDropData } from 'vs/base/browser/dnd';
-import { onUnexpectedError } from 'vs/base/common/errors';
 import { ElementsDragAndDropData } from 'vs/base/browser/ui/list/listView';
 import { FuzzyScore } from 'vs/base/common/filters';
 import { IHighlight } from 'vs/base/browser/ui/highlightedlabel/highlightedLabel';
 import { variableSetEmitter, VariablesRenderer } from 'vs/workbench/contrib/debug/browser/variablesView';
+import { IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
+import { dispose } from 'vs/base/common/lifecycle';
+import { SIDE_BAR_BACKGROUND } from 'vs/workbench/common/theme';
 
 const MAX_VALUE_RENDER_LENGTH_IN_VIEWLET = 1024;
 
-export class WatchExpressionsView extends ViewletPanel {
+export class WatchExpressionsView extends ViewletPane {
 
 	private onWatchExpressionsUpdatedScheduler: RunOnceScheduler;
-	private needsRefresh: boolean;
-	private tree: WorkbenchAsyncDataTree<IDebugService | IExpression, IExpression, FuzzyScore>;
+	private needsRefresh = false;
+	private tree!: WorkbenchAsyncDataTree<IDebugService | IExpression, IExpression, FuzzyScore>;
 
 	constructor(
 		options: IViewletViewOptions,
@@ -45,8 +47,9 @@ export class WatchExpressionsView extends ViewletPanel {
 		@IKeybindingService keybindingService: IKeybindingService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@IConfigurationService configurationService: IConfigurationService,
+		@IContextKeyService contextKeyService: IContextKeyService,
 	) {
-		super({ ...(options as IViewletPanelOptions), ariaHeaderLabel: nls.localize('watchExpressionsSection', "Watch Expressions Section") }, keybindingService, contextMenuService, configurationService);
+		super({ ...(options as IViewletPaneOptions), ariaHeaderLabel: nls.localize('watchExpressionsSection', "Watch Expressions Section") }, keybindingService, contextMenuService, configurationService, contextKeyService);
 
 		this.onWatchExpressionsUpdatedScheduler = new RunOnceScheduler(() => {
 			this.needsRefresh = false;
@@ -59,33 +62,41 @@ export class WatchExpressionsView extends ViewletPanel {
 		const treeContainer = renderViewTree(container);
 
 		const expressionsRenderer = this.instantiationService.createInstance(WatchExpressionsRenderer);
-		this.tree = this.instantiationService.createInstance(WorkbenchAsyncDataTree, treeContainer, new WatchExpressionsDelegate(), [expressionsRenderer, this.instantiationService.createInstance(VariablesRenderer)],
+		this.tree = this.instantiationService.createInstance<typeof WorkbenchAsyncDataTree, WorkbenchAsyncDataTree<IDebugService | IExpression, IExpression, FuzzyScore>>(WorkbenchAsyncDataTree, 'WatchExpressions', treeContainer, new WatchExpressionsDelegate(), [expressionsRenderer, this.instantiationService.createInstance(VariablesRenderer)],
 			new WatchExpressionsDataSource(), {
-				ariaLabel: nls.localize({ comment: ['Debug is a noun in this context, not a verb.'], key: 'watchAriaTreeLabel' }, "Debug Watch Expressions"),
-				accessibilityProvider: new WatchExpressionsAccessibilityProvider(),
-				identityProvider: { getId: element => (<IExpression>element).getId() },
-				keyboardNavigationLabelProvider: { getKeyboardNavigationLabel: e => e },
-				dnd: new WatchExpressionsDragAndDrop(this.debugService),
-			}) as WorkbenchAsyncDataTree<IDebugService | IExpression, IExpression, FuzzyScore>;
+			ariaLabel: nls.localize({ comment: ['Debug is a noun in this context, not a verb.'], key: 'watchAriaTreeLabel' }, "Debug Watch Expressions"),
+			accessibilityProvider: new WatchExpressionsAccessibilityProvider(),
+			identityProvider: { getId: (element: IExpression) => element.getId() },
+			keyboardNavigationLabelProvider: { getKeyboardNavigationLabel: (e: IExpression) => e },
+			dnd: new WatchExpressionsDragAndDrop(this.debugService),
+			overrideStyles: {
+				listBackground: SIDE_BAR_BACKGROUND
+			}
+		});
 
-		this.tree.setInput(this.debugService).then(undefined, onUnexpectedError);
+		this.tree.setInput(this.debugService);
 		CONTEXT_WATCH_EXPRESSIONS_FOCUSED.bindTo(this.tree.contextKeyService);
 
-		const addWatchExpressionAction = new AddWatchExpressionAction(AddWatchExpressionAction.ID, AddWatchExpressionAction.LABEL, this.debugService, this.keybindingService);
-		const collapseAction = new CollapseAction(this.tree, true, 'explorer-action collapse-explorer');
-		const removeAllWatchExpressionsAction = new RemoveAllWatchExpressionsAction(RemoveAllWatchExpressionsAction.ID, RemoveAllWatchExpressionsAction.LABEL, this.debugService, this.keybindingService);
-		this.toolbar.setActions([addWatchExpressionAction, collapseAction, removeAllWatchExpressionsAction])();
+		if (this.toolbar) {
+			const addWatchExpressionAction = new AddWatchExpressionAction(AddWatchExpressionAction.ID, AddWatchExpressionAction.LABEL, this.debugService, this.keybindingService);
+			const collapseAction = new CollapseAction(this.tree, true, 'explorer-action codicon-collapse-all');
+			const removeAllWatchExpressionsAction = new RemoveAllWatchExpressionsAction(RemoveAllWatchExpressionsAction.ID, RemoveAllWatchExpressionsAction.LABEL, this.debugService, this.keybindingService);
+			this.toolbar.setActions([addWatchExpressionAction, collapseAction, removeAllWatchExpressionsAction])();
+		}
 
-		this.disposables.push(this.tree.onContextMenu(e => this.onContextMenu(e)));
-		this.disposables.push(this.tree.onMouseDblClick(e => this.onMouseDblClick(e)));
-		this.disposables.push(this.debugService.getModel().onDidChangeWatchExpressions(we => {
+		this._register(this.tree.onContextMenu(e => this.onContextMenu(e)));
+		this._register(this.tree.onMouseDblClick(e => this.onMouseDblClick(e)));
+		this._register(this.debugService.getModel().onDidChangeWatchExpressions(async we => {
 			if (!this.isBodyVisible()) {
 				this.needsRefresh = true;
 			} else {
-				this.tree.updateChildren();
+				await this.tree.updateChildren();
+				if (we instanceof Expression) {
+					this.tree.reveal(we);
+				}
 			}
 		}));
-		this.disposables.push(this.debugService.getViewModel().onDidFocusStackFrame(() => {
+		this._register(this.debugService.getViewModel().onDidFocusStackFrame(() => {
 			if (!this.isBodyVisible()) {
 				this.needsRefresh = true;
 				return;
@@ -95,14 +106,14 @@ export class WatchExpressionsView extends ViewletPanel {
 				this.onWatchExpressionsUpdatedScheduler.schedule();
 			}
 		}));
-		this.disposables.push(variableSetEmitter.event(() => this.tree.updateChildren()));
+		this._register(variableSetEmitter.event(() => this.tree.updateChildren()));
 
-		this.disposables.push(this.onDidChangeBodyVisibility(visible => {
+		this._register(this.onDidChangeBodyVisibility(visible => {
 			if (visible && this.needsRefresh) {
 				this.onWatchExpressionsUpdatedScheduler.schedule();
 			}
 		}));
-		this.disposables.push(this.debugService.getViewModel().onDidSelectExpression(e => {
+		this._register(this.debugService.getViewModel().onDidSelectExpression(e => {
 			if (e instanceof Expression && e.name) {
 				this.tree.rerender(e);
 			}
@@ -144,20 +155,26 @@ export class WatchExpressionsView extends ViewletPanel {
 		if (element instanceof Expression) {
 			const expression = <Expression>element;
 			actions.push(new AddWatchExpressionAction(AddWatchExpressionAction.ID, AddWatchExpressionAction.LABEL, this.debugService, this.keybindingService));
-			actions.push(new EditWatchExpressionAction(EditWatchExpressionAction.ID, EditWatchExpressionAction.LABEL, this.debugService, this.keybindingService));
+			actions.push(new Action('debug.editWatchExpression', nls.localize('editWatchExpression', "Edit Expression"), undefined, true, () => {
+				this.debugService.getViewModel().setSelectedExpression(expression);
+				return Promise.resolve();
+			}));
 			if (!expression.hasChildren) {
-				actions.push(this.instantiationService.createInstance(CopyValueAction, CopyValueAction.ID, CopyValueAction.LABEL, expression.value, 'watch', this.debugService));
+				actions.push(this.instantiationService.createInstance(CopyValueAction, CopyValueAction.ID, CopyValueAction.LABEL, expression.value, 'watch'));
 			}
 			actions.push(new Separator());
 
-			actions.push(new RemoveWatchExpressionAction(RemoveWatchExpressionAction.ID, RemoveWatchExpressionAction.LABEL, this.debugService, this.keybindingService));
+			actions.push(new Action('debug.removeWatchExpression', nls.localize('removeWatchExpression', "Remove Expression"), undefined, true, () => {
+				this.debugService.removeWatchExpressions(expression.getId());
+				return Promise.resolve();
+			}));
 			actions.push(new RemoveAllWatchExpressionsAction(RemoveAllWatchExpressionsAction.ID, RemoveAllWatchExpressionsAction.LABEL, this.debugService, this.keybindingService));
 		} else {
 			actions.push(new AddWatchExpressionAction(AddWatchExpressionAction.ID, AddWatchExpressionAction.LABEL, this.debugService, this.keybindingService));
 			if (element instanceof Variable) {
 				const variable = element as Variable;
 				if (!variable.hasChildren) {
-					actions.push(this.instantiationService.createInstance(CopyValueAction, CopyValueAction.ID, CopyValueAction.LABEL, variable, 'watch', this.debugService));
+					actions.push(this.instantiationService.createInstance(CopyValueAction, CopyValueAction.ID, CopyValueAction.LABEL, variable, 'watch'));
 				}
 				actions.push(new Separator());
 			}
@@ -167,7 +184,8 @@ export class WatchExpressionsView extends ViewletPanel {
 		this.contextMenuService.showContextMenu({
 			getAnchor: () => anchor,
 			getActions: () => actions,
-			getActionsContext: () => element
+			getActionsContext: () => element,
+			onHide: () => dispose(actions)
 		});
 	}
 }
@@ -241,6 +259,7 @@ export class WatchExpressionsRenderer extends AbstractExpressionsRenderer {
 			onFinish: (value: string, success: boolean) => {
 				if (success && value) {
 					this.debugService.renameWatchExpression(expression.getId(), value);
+					variableSetEmitter.fire();
 				} else if (!expression.name) {
 					this.debugService.removeWatchExpressions(expression.getId());
 				}

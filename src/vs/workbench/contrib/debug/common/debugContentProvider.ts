@@ -81,7 +81,7 @@ export class DebugContentProvider implements IWorkbenchContribution, ITextModelC
 
 		if (resource.query) {
 			const data = Source.getEncodedDebugData(resource);
-			session = this.debugService.getModel().getSessions().filter(p => p.getId() === data.sessionId).pop();
+			session = this.debugService.getModel().getSession(data.sessionId);
 		}
 
 		if (!session) {
@@ -133,7 +133,7 @@ export class DebugContentProvider implements IWorkbenchContribution, ITextModelC
 					});
 				} else {
 					// create text model
-					const mime = response.body.mimeType || guessMimeTypes(resource.path)[0];
+					const mime = response.body.mimeType || guessMimeTypes(resource)[0];
 					const languageSelection = this.modeService.create(mime);
 					return this.modelService.createModel(response.body.content, languageSelection, resource);
 				}

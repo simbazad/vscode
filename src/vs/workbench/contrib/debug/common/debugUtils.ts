@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { equalsIgnoreCase } from 'vs/base/common/strings';
-import { IConfig, IDebuggerContribution } from 'vs/workbench/contrib/debug/common/debug';
+import { IConfig, IDebuggerContribution, IDebugSession } from 'vs/workbench/contrib/debug/common/debug';
 import { URI as uri } from 'vs/base/common/uri';
 import { isAbsolute } from 'vs/base/common/path';
 import { deepClone } from 'vs/base/common/objects';
@@ -23,8 +23,20 @@ export function formatPII(value: string, excludePII: boolean, args: { [key: stri
 	});
 }
 
+export function isSessionAttach(session: IDebugSession): boolean {
+	return !session.parentSession && session.configuration.request === 'attach' && !isExtensionHostDebugging(session.configuration);
+}
+
 export function isExtensionHostDebugging(config: IConfig) {
-	return config.type && equalsIgnoreCase(config.type === 'vslsShare' ? (<any>config).adapterProxy.configuration.type : config.type, 'extensionhost');
+	if (!config.type) {
+		return false;
+	}
+
+	const type = config.type === 'vslsShare'
+		? (<any>config).adapterProxy.configuration.type
+		: config.type;
+
+	return equalsIgnoreCase(type, 'extensionhost') || equalsIgnoreCase(type, 'pwa-extensionhost');
 }
 
 // only a debugger contributions with a label, program, or runtime attribute is considered a "defining" or "main" debugger contribution
@@ -173,6 +185,9 @@ function convertPaths(msg: DebugProtocol.ProtocolMessage, fixSourcePath: (toDA: 
 				case 'setBreakpoints':
 					fixSourcePath(true, (<DebugProtocol.SetBreakpointsArguments>request.arguments).source);
 					break;
+				case 'breakpointLocations':
+					fixSourcePath(true, (<DebugProtocol.BreakpointLocationsArguments>request.arguments).source);
+					break;
 				case 'source':
 					fixSourcePath(true, (<DebugProtocol.SourceArguments>request.arguments).source);
 					break;
@@ -180,7 +195,7 @@ function convertPaths(msg: DebugProtocol.ProtocolMessage, fixSourcePath: (toDA: 
 					fixSourcePath(true, (<DebugProtocol.GotoTargetsArguments>request.arguments).source);
 					break;
 				case 'launchVSCode':
-					request.arguments.args.forEach(arg => fixSourcePath(false, arg));
+					request.arguments.args.forEach((arg: PathContainer | undefined) => fixSourcePath(false, arg));
 					break;
 				default:
 					break;

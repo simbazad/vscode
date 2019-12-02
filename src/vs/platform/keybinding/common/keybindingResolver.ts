@@ -6,8 +6,9 @@
 import { isNonEmptyArray } from 'vs/base/common/arrays';
 import { MenuRegistry } from 'vs/platform/actions/common/actions';
 import { CommandsRegistry, ICommandHandlerDescription } from 'vs/platform/commands/common/commands';
-import { ContextKeyAndExpr, ContextKeyExpr, IContext } from 'vs/platform/contextkey/common/contextkey';
+import { ContextKeyExpr, IContext, ContextKeyOrExpr } from 'vs/platform/contextkey/common/contextkey';
 import { ResolvedKeybindingItem } from 'vs/platform/keybinding/common/resolvedKeybindingItem';
+import { keys } from 'vs/base/common/map';
 
 export interface IResolveResult {
 	enterChord: boolean;
@@ -50,7 +51,7 @@ export class KeybindingResolver {
 		}
 	}
 
-	private static _isTargetedForRemoval(defaultKb: ResolvedKeybindingItem, keypressFirstPart: string | null, keypressChordPart: string | null, command: string, when: ContextKeyExpr | null): boolean {
+	private static _isTargetedForRemoval(defaultKb: ResolvedKeybindingItem, keypressFirstPart: string | null, keypressChordPart: string | null, command: string, when: ContextKeyExpr | undefined): boolean {
 		if (defaultKb.command !== command) {
 			return false;
 		}
@@ -170,9 +171,8 @@ export class KeybindingResolver {
 
 	/**
 	 * Returns true if it is provable `a` implies `b`.
-	 * **Precondition**: Assumes `a` and `b` are normalized!
 	 */
-	public static whenIsEntirelyIncluded(a: ContextKeyExpr | null, b: ContextKeyExpr | null): boolean {
+	public static whenIsEntirelyIncluded(a: ContextKeyExpr | null | undefined, b: ContextKeyExpr | null | undefined): boolean {
 		if (!b) {
 			return true;
 		}
@@ -180,37 +180,46 @@ export class KeybindingResolver {
 			return false;
 		}
 
-		const aExpressions: ContextKeyExpr[] = ((a instanceof ContextKeyAndExpr) ? a.expr : [a]);
-		const bExpressions: ContextKeyExpr[] = ((b instanceof ContextKeyAndExpr) ? b.expr : [b]);
+		return this._implies(a, b);
+	}
 
-		let aIndex = 0;
-		for (const bExpr of bExpressions) {
-			let bExprMatched = false;
-			while (!bExprMatched && aIndex < aExpressions.length) {
-				let aExpr = aExpressions[aIndex];
-				if (aExpr.equals(bExpr)) {
-					bExprMatched = true;
-				}
-				aIndex++;
+	/**
+	 * Returns true if it is provable `p` implies `q`.
+	 */
+	private static _implies(p: ContextKeyExpr, q: ContextKeyExpr): boolean {
+		const notP = p.negate();
+
+		const terminals = (node: ContextKeyExpr) => {
+			if (node instanceof ContextKeyOrExpr) {
+				return node.expr;
 			}
+			return [node];
+		};
 
-			if (!bExprMatched) {
-				return false;
+		let expr = terminals(notP).concat(terminals(q));
+		for (let i = 0; i < expr.length; i++) {
+			const a = expr[i];
+			const notA = a.negate();
+			for (let j = i + 1; j < expr.length; j++) {
+				const b = expr[j];
+				if (notA.equals(b)) {
+					return true;
+				}
 			}
 		}
 
-		return true;
+		return false;
 	}
 
 	public getDefaultBoundCommands(): Map<string, boolean> {
 		return this._defaultBoundCommands;
 	}
 
-	public getDefaultKeybindings(): ResolvedKeybindingItem[] {
+	public getDefaultKeybindings(): readonly ResolvedKeybindingItem[] {
 		return this._defaultKeybindings;
 	}
 
-	public getKeybindings(): ResolvedKeybindingItem[] {
+	public getKeybindings(): readonly ResolvedKeybindingItem[] {
 		return this._keybindings;
 	}
 
@@ -304,7 +313,7 @@ export class KeybindingResolver {
 		return null;
 	}
 
-	public static contextMatchesRules(context: IContext, rules: ContextKeyExpr | null): boolean {
+	public static contextMatchesRules(context: IContext, rules: ContextKeyExpr | null | undefined): boolean {
 		if (!rules) {
 			return true;
 		}
@@ -334,10 +343,10 @@ export class KeybindingResolver {
 			}
 			unboundCommands.push(id);
 		};
-		for (const id in MenuRegistry.getCommands()) {
+		for (const id of keys(MenuRegistry.getCommands())) {
 			addCommand(id, true);
 		}
-		for (const id in CommandsRegistry.getCommands()) {
+		for (const id of keys(CommandsRegistry.getCommands())) {
 			addCommand(id, false);
 		}
 

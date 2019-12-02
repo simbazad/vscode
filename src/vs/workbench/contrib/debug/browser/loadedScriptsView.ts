@@ -7,7 +7,7 @@ import * as nls from 'vs/nls';
 import * as dom from 'vs/base/browser/dom';
 import { IViewletViewOptions } from 'vs/workbench/browser/parts/views/viewsViewlet';
 import { normalize, isAbsolute, posix } from 'vs/base/common/path';
-import { IViewletPanelOptions, ViewletPanel } from 'vs/workbench/browser/parts/views/panelViewlet';
+import { IViewletPaneOptions, ViewletPane } from 'vs/workbench/browser/parts/views/paneViewlet';
 import { IContextMenuService } from 'vs/platform/contextview/browser/contextView';
 import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
@@ -23,7 +23,7 @@ import { isWindows } from 'vs/base/common/platform';
 import { URI } from 'vs/base/common/uri';
 import { ltrim } from 'vs/base/common/strings';
 import { RunOnceScheduler } from 'vs/base/common/async';
-import { ResourceLabels, IResourceLabelProps, IResourceLabelOptions, IResourceLabel, IResourceLabelsContainer } from 'vs/workbench/browser/labels';
+import { ResourceLabels, IResourceLabelProps, IResourceLabelOptions, IResourceLabel } from 'vs/workbench/browser/labels';
 import { FileKind } from 'vs/platform/files/common/files';
 import { IListVirtualDelegate } from 'vs/base/browser/ui/list/list';
 import { ITreeRenderer, ITreeNode, ITreeFilter, TreeVisibility, TreeFilterResult, IAsyncDataSource } from 'vs/base/browser/ui/tree/tree';
@@ -33,24 +33,28 @@ import { WorkbenchAsyncDataTree, TreeResourceNavigator2 } from 'vs/platform/list
 import { dispose } from 'vs/base/common/lifecycle';
 import { createMatches, FuzzyScore } from 'vs/base/common/filters';
 import { DebugContentProvider } from 'vs/workbench/contrib/debug/common/debugContentProvider';
+import { ILabelService } from 'vs/platform/label/common/label';
+import { SIDE_BAR_BACKGROUND } from 'vs/workbench/common/theme';
 
 const SMART = true;
+
+// RFC 2396, Appendix A: https://www.ietf.org/rfc/rfc2396.txt
+const URI_SCHEMA_PATTERN = /^[a-zA-Z][a-zA-Z0-9\+\-\.]+:/;
 
 type LoadedScriptsItem = BaseTreeItem;
 
 class BaseTreeItem {
 
 	private _showedMoreThanOne: boolean;
-	private _children: { [key: string]: BaseTreeItem; };
-	private _source: Source;
+	private _children = new Map<string, BaseTreeItem>();
+	private _source: Source | undefined;
 
 	constructor(private _parent: BaseTreeItem | undefined, private _label: string) {
-		this._children = {};
 		this._showedMoreThanOne = false;
 	}
 
 	isLeaf(): boolean {
-		return Object.keys(this._children).length === 0;
+		return this._children.size === 0;
 	}
 
 	getSession(): IDebugSession | undefined {
@@ -62,12 +66,12 @@ class BaseTreeItem {
 
 	setSource(session: IDebugSession, source: Source): void {
 		this._source = source;
-		this._children = {};
+		this._children.clear();
 		if (source.raw && source.raw.sources) {
 			for (const src of source.raw.sources) {
 				if (src.name && src.path) {
 					const s = new BaseTreeItem(this, src.name);
-					this._children[src.path] = s;
+					this._children.set(src.path, s);
 					const ss = session.getSource(src);
 					s.setSource(session, ss);
 				}
@@ -76,26 +80,26 @@ class BaseTreeItem {
 	}
 
 	createIfNeeded<T extends BaseTreeItem>(key: string, factory: (parent: BaseTreeItem, label: string) => T): T {
-		let child = <T>this._children[key];
+		let child = <T>this._children.get(key);
 		if (!child) {
 			child = factory(this, key);
-			this._children[key] = child;
+			this._children.set(key, child);
 		}
 		return child;
 	}
 
-	getChild(key: string): BaseTreeItem {
-		return this._children[key];
+	getChild(key: string): BaseTreeItem | undefined {
+		return this._children.get(key);
 	}
 
 	remove(key: string): void {
-		delete this._children[key];
+		this._children.delete(key);
 	}
 
 	removeFromParent(): void {
 		if (this._parent) {
 			this._parent.remove(this._label);
-			if (Object.keys(this._parent._children).length === 0) {
+			if (this._parent._children.size === 0) {
 				this._parent.removeFromParent();
 			}
 		}
@@ -108,7 +112,11 @@ class BaseTreeItem {
 	// a dynamic ID based on the parent chain; required for reparenting (see #55448)
 	getId(): string {
 		const parent = this.getParent();
-		return parent ? `${parent.getId()}/${this._label}` : this._label;
+		return parent ? `${parent.getId()}/${this.getInternalId()}` : this.getInternalId();
+	}
+
+	getInternalId(): string {
+		return this._label;
 	}
 
 	// skips intermediate single-child nodes
@@ -138,7 +146,7 @@ class BaseTreeItem {
 		if (child) {
 			return child.hasChildren();
 		}
-		return Object.keys(this._children).length > 0;
+		return this._children.size > 0;
 	}
 
 	// skips intermediate single-child nodes
@@ -147,7 +155,10 @@ class BaseTreeItem {
 		if (child) {
 			return child.getChildren();
 		}
-		const array = Object.keys(this._children).map(key => this._children[key]);
+		const array: BaseTreeItem[] = [];
+		for (let child of this._children.values()) {
+			array.push(child);
+		}
 		return Promise.resolve(array.sort((a, b) => this.compare(a, b)));
 	}
 
@@ -178,7 +189,7 @@ class BaseTreeItem {
 	}
 
 	// skips intermediate single-child nodes
-	getSource(): Source {
+	getSource(): Source | undefined {
 		const child = this.oneChild();
 		if (child) {
 			return child.getSource();
@@ -195,12 +206,11 @@ class BaseTreeItem {
 
 	private oneChild(): BaseTreeItem | undefined {
 		if (SMART && !this._source && !this._showedMoreThanOne && !(this instanceof RootFolderTreeItem) && !(this instanceof SessionTreeItem)) {
-			const keys = Object.keys(this._children);
-			if (keys.length === 1) {
-				return this._children[keys[0]];
+			if (this._children.size === 1) {
+				return this._children.values().next().value;
 			}
 			// if a node had more than one child once, it will never be skipped again
-			if (keys.length > 1) {
+			if (this._children.size > 1) {
 				this._showedMoreThanOne = true;
 			}
 		}
@@ -217,7 +227,7 @@ class RootFolderTreeItem extends BaseTreeItem {
 
 class RootTreeItem extends BaseTreeItem {
 
-	constructor(private _debugModel: IDebugModel, private _environmentService: IEnvironmentService, private _contextService: IWorkspaceContextService) {
+	constructor(private _debugModel: IDebugModel, private _environmentService: IEnvironmentService, private _contextService: IWorkspaceContextService, private _labelService: ILabelService) {
 		super(undefined, 'Root');
 		this._debugModel.getSessions().forEach(session => {
 			this.add(session);
@@ -225,7 +235,7 @@ class RootTreeItem extends BaseTreeItem {
 	}
 
 	add(session: IDebugSession): SessionTreeItem {
-		return this.createIfNeeded(session.getId(), () => new SessionTreeItem(this, session, this._environmentService, this._contextService));
+		return this.createIfNeeded(session.getId(), () => new SessionTreeItem(this._labelService, this, session, this._environmentService, this._contextService));
 	}
 
 	find(session: IDebugSession): SessionTreeItem {
@@ -235,17 +245,22 @@ class RootTreeItem extends BaseTreeItem {
 
 class SessionTreeItem extends BaseTreeItem {
 
-	private static URL_REGEXP = /^(https?:\/\/[^/]+)(\/.*)$/;
+	private static readonly URL_REGEXP = /^(https?:\/\/[^/]+)(\/.*)$/;
 
 	private _session: IDebugSession;
 	private _initialized: boolean;
-	private _map: Map<string, BaseTreeItem>;
+	private _map = new Map<string, BaseTreeItem>();
+	private _labelService: ILabelService;
 
-	constructor(parent: BaseTreeItem, session: IDebugSession, private _environmentService: IEnvironmentService, private rootProvider: IWorkspaceContextService) {
+	constructor(labelService: ILabelService, parent: BaseTreeItem, session: IDebugSession, private _environmentService: IEnvironmentService, private rootProvider: IWorkspaceContextService) {
 		super(parent, session.getLabel());
+		this._labelService = labelService;
 		this._initialized = false;
 		this._session = session;
-		this._map = new Map();
+	}
+
+	getInternalId(): string {
+		return this._session.getId();
 	}
 
 	getSession(): IDebugSession {
@@ -309,6 +324,10 @@ class SessionTreeItem extends BaseTreeItem {
 			return;
 		}
 
+		if (this._labelService && URI_SCHEMA_PATTERN.test(path)) {
+			path = this._labelService.getUriLabel(URI.parse(path));
+		}
+
 		const match = SessionTreeItem.URL_REGEXP.exec(path);
 		if (match && match.length === 3) {
 			url = match[1];
@@ -369,15 +388,15 @@ class SessionTreeItem extends BaseTreeItem {
 	}
 }
 
-export class LoadedScriptsView extends ViewletPanel {
+export class LoadedScriptsView extends ViewletPane {
 
-	private treeContainer: HTMLElement;
+	private treeContainer!: HTMLElement;
 	private loadedScriptsItemType: IContextKey<string>;
-	private tree: WorkbenchAsyncDataTree<LoadedScriptsItem, LoadedScriptsItem, FuzzyScore>;
-	private treeLabels: ResourceLabels;
-	private changeScheduler: RunOnceScheduler;
-	private treeNeedsRefreshOnVisible: boolean;
-	private filter: LoadedScriptsFilter;
+	private tree!: WorkbenchAsyncDataTree<LoadedScriptsItem, LoadedScriptsItem, FuzzyScore>;
+	private treeLabels!: ResourceLabels;
+	private changeScheduler!: RunOnceScheduler;
+	private treeNeedsRefreshOnVisible = false;
+	private filter!: LoadedScriptsFilter;
 
 	constructor(
 		options: IViewletViewOptions,
@@ -390,8 +409,9 @@ export class LoadedScriptsView extends ViewletPanel {
 		@IWorkspaceContextService private readonly contextService: IWorkspaceContextService,
 		@IEnvironmentService private readonly environmentService: IEnvironmentService,
 		@IDebugService private readonly debugService: IDebugService,
+		@ILabelService private readonly labelService: ILabelService
 	) {
-		super({ ...(options as IViewletPanelOptions), ariaHeaderLabel: nls.localize('loadedScriptsSection', "Loaded Scripts Section") }, keybindingService, contextMenuService, configurationService);
+		super({ ...(options as IViewletPaneOptions), ariaHeaderLabel: nls.localize('loadedScriptsSection', "Loaded Scripts Section") }, keybindingService, contextMenuService, configurationService, contextKeyService);
 		this.loadedScriptsItemType = CONTEXT_LOADED_SCRIPTS_ITEM_TYPE.bindTo(contextKeyService);
 	}
 
@@ -403,26 +423,29 @@ export class LoadedScriptsView extends ViewletPanel {
 
 		this.filter = new LoadedScriptsFilter();
 
-		const root = new RootTreeItem(this.debugService.getModel(), this.environmentService, this.contextService);
+		const root = new RootTreeItem(this.debugService.getModel(), this.environmentService, this.contextService, this.labelService);
 
-		this.treeLabels = this.instantiationService.createInstance(ResourceLabels, { onDidChangeVisibility: this.onDidChangeBodyVisibility } as IResourceLabelsContainer);
-		this.disposables.push(this.treeLabels);
+		this.treeLabels = this.instantiationService.createInstance(ResourceLabels, { onDidChangeVisibility: this.onDidChangeBodyVisibility });
+		this._register(this.treeLabels);
 
-		this.tree = this.instantiationService.createInstance(WorkbenchAsyncDataTree, this.treeContainer, new LoadedScriptsDelegate(),
+		this.tree = this.instantiationService.createInstance<typeof WorkbenchAsyncDataTree, WorkbenchAsyncDataTree<LoadedScriptsItem, LoadedScriptsItem, FuzzyScore>>(WorkbenchAsyncDataTree, 'LoadedScriptsView', this.treeContainer, new LoadedScriptsDelegate(),
 			[new LoadedScriptsRenderer(this.treeLabels)],
 			new LoadedScriptsDataSource(),
 			{
 				identityProvider: {
-					getId: element => (<LoadedScriptsItem>element).getId()
+					getId: (element: LoadedScriptsItem) => element.getId()
 				},
 				keyboardNavigationLabelProvider: {
-					getKeyboardNavigationLabel: element => (<LoadedScriptsItem>element).getLabel()
+					getKeyboardNavigationLabel: (element: LoadedScriptsItem) => element.getLabel()
 				},
 				filter: this.filter,
 				accessibilityProvider: new LoadedSciptsAccessibilityProvider(),
 				ariaLabel: nls.localize({ comment: ['Debug is a noun in this context, not a verb.'], key: 'loadedScriptsAriaLabel' }, "Debug Loaded Scripts"),
+				overrideStyles: {
+					listBackground: SIDE_BAR_BACKGROUND
+				}
 			}
-		) as WorkbenchAsyncDataTree<LoadedScriptsItem, LoadedScriptsItem, FuzzyScore>;
+		);
 
 		this.tree.setInput(root);
 
@@ -432,11 +455,11 @@ export class LoadedScriptsView extends ViewletPanel {
 				this.tree.updateChildren();
 			}
 		}, 300);
-		this.disposables.push(this.changeScheduler);
+		this._register(this.changeScheduler);
 
 		const loadedScriptsNavigator = new TreeResourceNavigator2(this.tree);
-		this.disposables.push(loadedScriptsNavigator);
-		this.disposables.push(loadedScriptsNavigator.onDidOpenResource(e => {
+		this._register(loadedScriptsNavigator);
+		this._register(loadedScriptsNavigator.onDidOpenResource(e => {
 			if (e.element instanceof BaseTreeItem) {
 				const source = e.element.getSource();
 				if (source && source.available) {
@@ -446,7 +469,7 @@ export class LoadedScriptsView extends ViewletPanel {
 			}
 		}));
 
-		this.disposables.push(this.tree.onDidChangeFocus(() => {
+		this._register(this.tree.onDidChangeFocus(() => {
 			const focus = this.tree.getFocus();
 			if (focus instanceof SessionTreeItem) {
 				this.loadedScriptsItemType.set('session');
@@ -455,19 +478,29 @@ export class LoadedScriptsView extends ViewletPanel {
 			}
 		}));
 
-		const registerLoadedSourceListener = (session: IDebugSession) => {
-			this.disposables.push(session.onDidLoadedSource(event => {
+		const scheduleRefreshOnVisible = () => {
+			if (this.isBodyVisible()) {
+				this.changeScheduler.schedule();
+			} else {
+				this.treeNeedsRefreshOnVisible = true;
+			}
+		};
+
+		const registerSessionListeners = (session: IDebugSession) => {
+			this._register(session.onDidChangeName(() => {
+				// Re-add session, this will trigger proper sorting and id recalculation.
+				root.remove(session.getId());
+				root.add(session);
+				scheduleRefreshOnVisible();
+			}));
+			this._register(session.onDidLoadedSource(event => {
 				let sessionRoot: SessionTreeItem;
 				switch (event.reason) {
 					case 'new':
 					case 'changed':
 						sessionRoot = root.add(session);
 						sessionRoot.addPath(event.source);
-						if (this.isBodyVisible()) {
-							this.changeScheduler.schedule();
-						} else {
-							this.treeNeedsRefreshOnVisible = true;
-						}
+						scheduleRefreshOnVisible();
 						if (event.reason === 'changed') {
 							DebugContentProvider.refreshDebugContent(event.source.uri);
 						}
@@ -475,11 +508,7 @@ export class LoadedScriptsView extends ViewletPanel {
 					case 'removed':
 						sessionRoot = root.find(session);
 						if (sessionRoot && sessionRoot.removePath(event.source)) {
-							if (this.isBodyVisible()) {
-								this.changeScheduler.schedule();
-							} else {
-								this.treeNeedsRefreshOnVisible = true;
-							}
+							scheduleRefreshOnVisible();
 						}
 						break;
 					default:
@@ -490,17 +519,17 @@ export class LoadedScriptsView extends ViewletPanel {
 			}));
 		};
 
-		this.disposables.push(this.debugService.onDidNewSession(registerLoadedSourceListener));
-		this.debugService.getModel().getSessions().forEach(registerLoadedSourceListener);
+		this._register(this.debugService.onDidNewSession(registerSessionListeners));
+		this.debugService.getModel().getSessions().forEach(registerSessionListeners);
 
-		this.disposables.push(this.debugService.onDidEndSession(session => {
+		this._register(this.debugService.onDidEndSession(session => {
 			root.remove(session.getId());
 			this.changeScheduler.schedule();
 		}));
 
 		this.changeScheduler.schedule(0);
 
-		this.disposables.push(this.onDidChangeBodyVisibility(visible => {
+		this._register(this.onDidChangeBodyVisibility(visible => {
 			if (visible && this.treeNeedsRefreshOnVisible) {
 				this.changeScheduler.schedule();
 			}
@@ -624,7 +653,7 @@ class LoadedSciptsAccessibilityProvider implements IAccessibilityProvider<Loaded
 
 class LoadedScriptsFilter implements ITreeFilter<BaseTreeItem, FuzzyScore> {
 
-	private filterText: string;
+	private filterText: string | undefined;
 
 	setFilter(filterText: string) {
 		this.filterText = filterText;

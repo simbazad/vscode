@@ -4,16 +4,16 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
-import { MainThreadDocumentsAndEditors } from 'vs/workbench/api/electron-browser/mainThreadDocumentsAndEditors';
+import { MainThreadDocumentsAndEditors } from 'vs/workbench/api/browser/mainThreadDocumentsAndEditors';
 import { SingleProxyRPCProtocol, TestRPCProtocol } from './testRPCProtocol';
 import { TestConfigurationService } from 'vs/platform/configuration/test/common/testConfigurationService';
 import { ModelServiceImpl } from 'vs/editor/common/services/modelServiceImpl';
 import { TestCodeEditorService } from 'vs/editor/test/browser/editorTestServices';
 import { ITextFileService } from 'vs/workbench/services/textfile/common/textfiles';
-import { ExtHostDocumentsAndEditorsShape, ExtHostContext, ExtHostDocumentsShape } from 'vs/workbench/api/node/extHost.protocol';
+import { ExtHostDocumentsAndEditorsShape, ExtHostContext, ExtHostDocumentsShape } from 'vs/workbench/api/common/extHost.protocol';
 import { mock } from 'vs/workbench/test/electron-browser/api/mock';
 import { Event } from 'vs/base/common/event';
-import { MainThreadTextEditors } from 'vs/workbench/api/electron-browser/mainThreadEditors';
+import { MainThreadTextEditors } from 'vs/workbench/api/browser/mainThreadEditors';
 import { URI } from 'vs/base/common/uri';
 import { Range } from 'vs/editor/common/core/range';
 import { Position } from 'vs/editor/common/core/position';
@@ -27,6 +27,7 @@ import { ITextModelService, IResolvedTextEditorModel } from 'vs/editor/common/se
 import { IReference, ImmortalReference } from 'vs/base/common/lifecycle';
 import { IPanelService } from 'vs/workbench/services/panel/common/panelService';
 import { LabelService } from 'vs/workbench/services/label/common/labelService';
+import { TestThemeService } from 'vs/platform/theme/test/common/testThemeService';
 
 suite('MainThreadEditors', () => {
 
@@ -36,15 +37,17 @@ suite('MainThreadEditors', () => {
 	let editors: MainThreadTextEditors;
 
 	const movedResources = new Map<URI, URI>();
+	const copiedResources = new Map<URI, URI>();
 	const createdResources = new Set<URI>();
 	const deletedResources = new Set<URI>();
 
 	setup(() => {
 		const configService = new TestConfigurationService();
-		modelService = new ModelServiceImpl(configService, new TestTextResourcePropertiesService(configService));
+		modelService = new ModelServiceImpl(configService, new TestTextResourcePropertiesService(configService), new TestThemeService());
 		const codeEditorService = new TestCodeEditorService();
 
 		movedResources.clear();
+		copiedResources.clear();
 		createdResources.clear();
 		deletedResources.clear();
 
@@ -54,7 +57,7 @@ suite('MainThreadEditors', () => {
 			isDirty() { return false; }
 			create(uri: URI, contents?: string, options?: any) {
 				createdResources.add(uri);
-				return Promise.resolve(undefined);
+				return Promise.resolve(Object.create(null));
 			}
 			delete(resource: URI) {
 				deletedResources.add(resource);
@@ -62,7 +65,11 @@ suite('MainThreadEditors', () => {
 			}
 			move(source: URI, target: URI) {
 				movedResources.set(source, target);
-				return Promise.resolve(undefined);
+				return Promise.resolve(Object.create(null));
+			}
+			copy(source: URI, target: URI) {
+				copiedResources.set(source, target);
+				return Promise.resolve(Object.create(null));
 			}
 			models = <any>{
 				onModelSaved: Event.None,
@@ -107,13 +114,14 @@ suite('MainThreadEditors', () => {
 			editorGroupService,
 			bulkEditService,
 			new class extends mock<IPanelService>() implements IPanelService {
-				_serviceBrand: any;
+				_serviceBrand: undefined;
 				onDidPanelOpen = Event.None;
 				onDidPanelClose = Event.None;
 				getActivePanel() {
-					return null;
+					return undefined;
 				}
-			}
+			},
+			TestEnvironmentService
 		);
 
 		editors = new MainThreadTextEditors(
