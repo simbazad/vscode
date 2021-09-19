@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as strings from 'vs/base/common/strings';
+import * as stringBuilder from 'vs/editor/common/core/stringBuilder';
 import { Range } from 'vs/editor/common/core/range';
 import { LanguageIdentifier } from 'vs/editor/common/modes';
 import { CharacterPair } from 'vs/editor/common/modes/languageConfiguration';
@@ -14,7 +15,7 @@ interface InternalBracket {
 }
 
 export class RichEditBracket {
-	_richEditBracketBrand: void;
+	_richEditBracketBrand: void = undefined;
 
 	readonly languageIdentifier: LanguageIdentifier;
 	readonly index: number;
@@ -112,7 +113,7 @@ function groupFuzzyBrackets(brackets: CharacterPair[]): InternalBracket[] {
 }
 
 export class RichEditBrackets {
-	_richEditBracketsBrand: void;
+	_richEditBracketsBrand: void = undefined;
 
 	public readonly brackets: RichEditBracket[];
 	public readonly forwardRegex: RegExp;
@@ -264,14 +265,24 @@ function createBracketOrRegExp(pieces: string[]): RegExp {
 	return strings.createRegExp(regexStr, true);
 }
 
-let toReversedString = (function () {
+const toReversedString = (function () {
 
 	function reverse(str: string): string {
-		let reversedStr = '';
-		for (let i = str.length - 1; i >= 0; i--) {
-			reversedStr += str.charAt(i);
+		if (stringBuilder.hasTextDecoder) {
+			// create a Uint16Array and then use a TextDecoder to create a string
+			const arr = new Uint16Array(str.length);
+			let offset = 0;
+			for (let i = str.length - 1; i >= 0; i--) {
+				arr[offset++] = str.charCodeAt(i);
+			}
+			return stringBuilder.getPlatformTextDecoder().decode(arr);
+		} else {
+			let result: string[] = [], resultLen = 0;
+			for (let i = str.length - 1; i >= 0; i--) {
+				result[resultLen++] = str.charAt(i);
+			}
+			return result.join('');
 		}
-		return reversedStr;
 	}
 
 	let lastInput: string | null = null;

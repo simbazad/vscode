@@ -13,6 +13,7 @@ import { TextModel } from 'vs/editor/common/model/textModel';
 import * as modes from 'vs/editor/common/modes';
 import { CodeActionModel, CodeActionsState } from 'vs/editor/contrib/codeAction/codeActionModel';
 import { createTestCodeEditor } from 'vs/editor/test/browser/testCodeEditor';
+import { createTextModel } from 'vs/editor/test/common/editorTestUtils';
 import { MockContextKeyService } from 'vs/platform/keybinding/test/common/mockKeybindingService';
 import { MarkerService } from 'vs/platform/markers/common/markerService';
 
@@ -38,7 +39,7 @@ suite('CodeActionModel', () => {
 	setup(() => {
 		disposables.clear();
 		markerService = new MarkerService();
-		model = TextModel.createFromString('foobar  foo bar\nfarboo far boo', undefined, languageIdentifier, uri);
+		model = createTextModel('foobar  foo bar\nfarboo far boo', undefined, languageIdentifier, uri);
 		editor = createTestCodeEditor({ model: model });
 		editor.setPosition({ lineNumber: 1, column: 1 });
 	});
@@ -59,12 +60,12 @@ suite('CodeActionModel', () => {
 		disposables.add(model.onDidChangeState((e: CodeActionsState.State) => {
 			assertType(e.type === CodeActionsState.Type.Triggered);
 
-			assert.strictEqual(e.trigger.type, 'auto');
+			assert.strictEqual(e.trigger.type, modes.CodeActionTriggerType.Auto);
 			assert.ok(e.actions);
 
 			e.actions.then(fixes => {
 				model.dispose();
-				assert.equal(fixes.validActions.length, 1);
+				assert.strictEqual(fixes.validActions.length, 1);
 				done();
 			}, done);
 		}));
@@ -100,11 +101,11 @@ suite('CodeActionModel', () => {
 			disposables.add(model.onDidChangeState((e: CodeActionsState.State) => {
 				assertType(e.type === CodeActionsState.Type.Triggered);
 
-				assert.equal(e.trigger.type, 'auto');
+				assert.strictEqual(e.trigger.type, modes.CodeActionTriggerType.Auto);
 				assert.ok(e.actions);
 				e.actions.then(fixes => {
 					model.dispose();
-					assert.equal(fixes.validActions.length, 1);
+					assert.strictEqual(fixes.validActions.length, 1);
 					resolve(undefined);
 				}, reject);
 			}));
@@ -138,13 +139,14 @@ suite('CodeActionModel', () => {
 			disposables.add(model.onDidChangeState((e: CodeActionsState.State) => {
 				assertType(e.type === CodeActionsState.Type.Triggered);
 
-				assert.equal(e.trigger.type, 'auto');
+				assert.strictEqual(e.trigger.type, modes.CodeActionTriggerType.Auto);
 				const selection = <Selection>e.rangeOrSelection;
-				assert.deepEqual(selection.selectionStartLineNumber, 1);
-				assert.deepEqual(selection.selectionStartColumn, 1);
-				assert.deepEqual(selection.endLineNumber, 4);
-				assert.deepEqual(selection.endColumn, 1);
-				assert.deepEqual(e.position, { lineNumber: 3, column: 1 });
+				assert.strictEqual(selection.selectionStartLineNumber, 1);
+				assert.strictEqual(selection.selectionStartColumn, 1);
+				assert.strictEqual(selection.endLineNumber, 4);
+				assert.strictEqual(selection.endColumn, 1);
+				assert.strictEqual(e.position.lineNumber, 3);
+				assert.strictEqual(e.position.column, 1);
 				model.dispose();
 				resolve(undefined);
 			}, 5));
@@ -163,7 +165,7 @@ suite('CodeActionModel', () => {
 		disposables.add(model.onDidChangeState((e: CodeActionsState.State) => {
 			assertType(e.type === CodeActionsState.Type.Triggered);
 
-			assert.equal(e.trigger.type, 'auto');
+			assert.strictEqual(e.trigger.type, modes.CodeActionTriggerType.Auto);
 			++triggerCount;
 
 			// give time for second trigger before completing test

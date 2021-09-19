@@ -18,18 +18,18 @@ import { nullTokenize2 } from 'vs/editor/common/modes/nullMode';
 import { generateTokensCSSForColorMap } from 'vs/editor/common/modes/supports/tokenization';
 import { IModeService } from 'vs/editor/common/services/modeService';
 import { ILogService } from 'vs/platform/log/common/log';
-import { INotificationService, Severity } from 'vs/platform/notification/common/notification';
-import { IStorageService, StorageScope } from 'vs/platform/storage/common/storage';
+import { INotificationService } from 'vs/platform/notification/common/notification';
 import { ExtensionMessageCollector } from 'vs/workbench/services/extensions/common/extensionsRegistry';
 import { ITMSyntaxExtensionPoint, grammarsExtPoint } from 'vs/workbench/services/textMate/common/TMGrammars';
 import { ITextMateService } from 'vs/workbench/services/textMate/common/textMateService';
-import { ITextMateThemingRule, IWorkbenchThemeService, IColorTheme } from 'vs/workbench/services/themes/common/workbenchThemeService';
-import { IGrammar, StackElement, IOnigLib, IRawTheme } from 'vscode-textmate';
+import { ITextMateThemingRule, IWorkbenchThemeService, IWorkbenchColorTheme } from 'vs/workbench/services/themes/common/workbenchThemeService';
+import type { IGrammar, StackElement, IOnigLib, IRawTheme } from 'vscode-textmate';
 import { Disposable, IDisposable, dispose } from 'vs/base/common/lifecycle';
 import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
 import { IValidGrammarDefinition, IValidEmbeddedLanguagesMap, IValidTokenTypeMap } from 'vs/workbench/services/textMate/common/TMScopeRegistry';
 import { TMGrammarFactory } from 'vs/workbench/services/textMate/common/TMGrammarFactory';
 import { IExtensionResourceLoaderService } from 'vs/workbench/services/extensionResourceLoader/common/extensionResourceLoader';
+import { IProgressService, ProgressLocation } from 'vs/platform/progress/common/progress';
 
 export abstract class AbstractTextMateService extends Disposable implements ITextMateService {
 	public _serviceBrand: undefined;
@@ -40,6 +40,9 @@ export abstract class AbstractTextMateService extends Disposable implements ITex
 	private readonly _styleElement: HTMLStyleElement;
 	private readonly _createdModes: string[];
 	private readonly _encounteredLanguages: boolean[];
+
+	private _debugMode: boolean;
+	private _debugModePrintFunc: (str: string) => void;
 
 	private _grammarDefinitions: IValidGrammarDefinition[] | null;
 	private _grammarFactory: TMGrammarFactory | null;
@@ -54,13 +57,16 @@ export abstract class AbstractTextMateService extends Disposable implements ITex
 		@INotificationService private readonly _notificationService: INotificationService,
 		@ILogService private readonly _logService: ILogService,
 		@IConfigurationService private readonly _configurationService: IConfigurationService,
-		@IStorageService private readonly _storageService: IStorageService
+		@IProgressService private readonly _progressService: IProgressService
 	) {
 		super();
 		this._styleElement = dom.createStyleSheet();
 		this._styleElement.className = 'vscode-tokens-styles';
 		this._createdModes = [];
 		this._encounteredLanguages = [];
+
+		this._debugMode = false;
+		this._debugModePrintFunc = () => { };
 
 		this._grammarDefinitions = null;
 		this._grammarFactory = null;
@@ -174,6 +180,46 @@ export abstract class AbstractTextMateService extends Disposable implements ITex
 		});
 	}
 
+	public startDebugMode(printFn: (str: string) => void, onStop: () => void): void {
+		if (this._debugMode) {
+			this._notificationService.error(nls.localize('alreadyDebugging', "Already Logging."));
+			return;
+		}
+
+		this._debugModePrintFunc = printFn;
+		this._debugMode = true;
+
+		if (this._debugMode) {
+			this._progressService.withProgress(
+				{
+					location: ProgressLocation.Notification,
+					buttons: [nls.localize('stop', "Stop")]
+				},
+				(progress) => {
+					progress.report({
+						message: nls.localize('progress1', "Preparing to log TM Grammar parsing. Press Stop when finished.")
+					});
+
+					return this._getVSCodeOniguruma().then((vscodeOniguruma) => {
+						vscodeOniguruma.setDefaultDebugCall(true);
+						progress.report({
+							message: nls.localize('progress2', "Now logging TM Grammar parsing. Press Stop when finished.")
+						});
+						return new Promise<void>((resolve, reject) => { });
+					});
+				},
+				(choice) => {
+					this._getVSCodeOniguruma().then((vscodeOniguruma) => {
+						this._debugModePrintFunc = () => { };
+						this._debugMode = false;
+						vscodeOniguruma.setDefaultDebugCall(false);
+						onStop();
+					});
+				}
+			);
+		}
+	}
+
 	private _canCreateGrammarFactory(): boolean {
 		// Check if extension point is ready
 		return (this._grammarDefinitions ? true : false);
@@ -184,7 +230,11 @@ export abstract class AbstractTextMateService extends Disposable implements ITex
 			return this._grammarFactory;
 		}
 
-		const vscodeTextmate = await this._loadVSCodeTextmate();
+		const [vscodeTextmate, vscodeOniguruma] = await Promise.all([import('vscode-textmate'), this._getVSCodeOniguruma()]);
+		const onigLib: Promise<IOnigLib> = Promise.resolve({
+			createOnigScanner: (sources: string[]) => vscodeOniguruma.createOnigScanner(sources),
+			createOnigString: (str: string) => vscodeOniguruma.createOnigString(str)
+		});
 
 		// Avoid duplicate instantiations
 		if (this._grammarFactory) {
@@ -195,7 +245,7 @@ export abstract class AbstractTextMateService extends Disposable implements ITex
 			logTrace: (msg: string) => this._logService.trace(msg),
 			logError: (msg: string, err: any) => this._logService.error(msg, err),
 			readFile: (resource: URI) => this._extensionResourceLoaderService.readExtensionResource(resource)
-		}, this._grammarDefinitions || [], vscodeTextmate, this._loadOnigLib());
+		}, this._grammarDefinitions || [], vscodeTextmate, onigLib);
 		this._onDidCreateGrammarFactory(this._grammarDefinitions || []);
 
 		this._updateTheme(this._grammarFactory, this._themeService.getColorTheme(), true);
@@ -231,7 +281,7 @@ export abstract class AbstractTextMateService extends Disposable implements ITex
 						this._onDidEncounterLanguage.fire(languageId);
 					}
 				});
-				return new TMTokenizationSupport(r.languageId, tokenization, this._notificationService, this._configurationService, this._storageService);
+				return new TMTokenizationSupport(r.languageId, tokenization, this._configurationService);
 			} catch (err) {
 				onUnexpectedError(err);
 				return null;
@@ -247,7 +297,7 @@ export abstract class AbstractTextMateService extends Disposable implements ITex
 		return result;
 	}
 
-	private _updateTheme(grammarFactory: TMGrammarFactory, colorTheme: IColorTheme, forceUpdate: boolean): void {
+	private _updateTheme(grammarFactory: TMGrammarFactory, colorTheme: IWorkbenchColorTheme, forceUpdate: boolean): void {
 		if (!forceUpdate && this._currentTheme && this._currentTokenColorMap && AbstractTextMateService.equalsTokenRules(this._currentTheme.settings, colorTheme.tokenColors) && equalArray(this._currentTokenColorMap, colorTheme.tokenColorMap)) {
 			return;
 		}
@@ -260,7 +310,7 @@ export abstract class AbstractTextMateService extends Disposable implements ITex
 		grammarFactory.setTheme(theme, tokenColorMap);
 		let colorMap = AbstractTextMateService._toColorMap(tokenColorMap);
 		let cssRules = generateTokensCSSForColorMap(colorMap);
-		this._styleElement.innerHTML = cssRules;
+		this._styleElement.textContent = cssRules;
 		TokenizationRegistry.setColorMap(colorMap);
 	}
 
@@ -322,8 +372,15 @@ export abstract class AbstractTextMateService extends Disposable implements ITex
 	}
 
 	public async createGrammar(modeId: string): Promise<IGrammar | null> {
+		const languageId = this._modeService.getLanguageIdentifier(modeId);
+		if (!languageId) {
+			return null;
+		}
 		const grammarFactory = await this._getOrCreateGrammarFactory();
-		const { grammar } = await grammarFactory.createGrammar(this._modeService.getLanguageIdentifier(modeId)!.id);
+		if (!grammarFactory.has(languageId.id)) {
+			return null;
+		}
+		const { grammar } = await grammarFactory.createGrammar(languageId.id);
 		return grammar;
 	}
 
@@ -333,28 +390,41 @@ export abstract class AbstractTextMateService extends Disposable implements ITex
 	protected _onDidDisposeGrammarFactory(): void {
 	}
 
-	protected abstract _loadVSCodeTextmate(): Promise<typeof import('vscode-textmate')>;
-	protected abstract _loadOnigLib(): Promise<IOnigLib> | undefined;
-}
+	private _vscodeOniguruma: Promise<typeof import('vscode-oniguruma')> | null = null;
+	private _getVSCodeOniguruma(): Promise<typeof import('vscode-oniguruma')> {
+		if (!this._vscodeOniguruma) {
+			this._vscodeOniguruma = this._doGetVSCodeOniguruma();
+		}
+		return this._vscodeOniguruma;
+	}
 
-const donotAskUpdateKey = 'editor.maxTokenizationLineLength.donotask';
+	private async _doGetVSCodeOniguruma(): Promise<typeof import('vscode-oniguruma')> {
+		const [vscodeOniguruma, wasm] = await Promise.all([import('vscode-oniguruma'), this._loadVSCodeOnigurumWASM()]);
+		const options = {
+			data: wasm,
+			print: (str: string) => {
+				this._debugModePrintFunc(str);
+			}
+		};
+		await vscodeOniguruma.loadWASM(options);
+		return vscodeOniguruma;
+	}
+
+	protected abstract _loadVSCodeOnigurumWASM(): Promise<Response | ArrayBuffer>;
+}
 
 class TMTokenizationSupport implements ITokenizationSupport {
 	private readonly _languageId: LanguageId;
 	private readonly _actual: TMTokenization;
-	private _tokenizationWarningAlreadyShown: boolean;
 	private _maxTokenizationLineLength: number;
 
 	constructor(
 		languageId: LanguageId,
 		actual: TMTokenization,
-		@INotificationService private readonly _notificationService: INotificationService,
 		@IConfigurationService private readonly _configurationService: IConfigurationService,
-		@IStorageService private readonly _storageService: IStorageService
 	) {
 		this._languageId = languageId;
 		this._actual = actual;
-		this._tokenizationWarningAlreadyShown = !!(this._storageService.getBoolean(donotAskUpdateKey, StorageScope.GLOBAL));
 		this._maxTokenizationLineLength = this._configurationService.getValue<number>('editor.maxTokenizationLineLength');
 		this._configurationService.onDidChangeConfiguration(e => {
 			if (e.affectsConfiguration('editor.maxTokenizationLineLength')) {
@@ -367,30 +437,17 @@ class TMTokenizationSupport implements ITokenizationSupport {
 		return this._actual.getInitialState();
 	}
 
-	tokenize(line: string, state: IState, offsetDelta: number): TokenizationResult {
+	tokenize(line: string, hasEOL: boolean, state: IState, offsetDelta: number): TokenizationResult {
 		throw new Error('Not supported!');
 	}
 
-	tokenize2(line: string, state: StackElement, offsetDelta: number): TokenizationResult2 {
+	tokenize2(line: string, hasEOL: boolean, state: StackElement, offsetDelta: number): TokenizationResult2 {
 		if (offsetDelta !== 0) {
 			throw new Error('Unexpected: offsetDelta should be 0.');
 		}
 
 		// Do not attempt to tokenize if a line is too long
 		if (line.length >= this._maxTokenizationLineLength) {
-			if (!this._tokenizationWarningAlreadyShown) {
-				this._tokenizationWarningAlreadyShown = true;
-				this._notificationService.prompt(
-					Severity.Warning,
-					nls.localize('too many characters', "Tokenization is skipped for long lines for performance reasons. The length of a long line can be configured via `editor.maxTokenizationLineLength`."),
-					[{
-						label: nls.localize('neverAgain', "Don't Show Again"),
-						isSecondary: true,
-						run: () => this._storageService.store(donotAskUpdateKey, true, StorageScope.GLOBAL)
-					}]
-				);
-			}
-			console.log(`Line (${line.substr(0, 15)}...): longer than ${this._maxTokenizationLineLength} characters, tokenization skipped.`);
 			return nullTokenize2(this._languageId, line, state, offsetDelta);
 		}
 

@@ -3,13 +3,13 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import 'vs/css!./zoneWidget';
 import * as dom from 'vs/base/browser/dom';
 import { IHorizontalSashLayoutProvider, ISashEvent, Orientation, Sash, SashState } from 'vs/base/browser/ui/sash/sash';
 import { Color, RGBA } from 'vs/base/common/color';
 import { IdGenerator } from 'vs/base/common/idGenerator';
 import { DisposableStore } from 'vs/base/common/lifecycle';
 import * as objects from 'vs/base/common/objects';
+import 'vs/css!./zoneWidget';
 import { ICodeEditor, IOverlayWidget, IOverlayWidgetPosition, IViewZone, IViewZoneChangeAccessor } from 'vs/editor/browser/editorBrowser';
 import { EditorLayoutInfo, EditorOption } from 'vs/editor/common/config/editorOptions';
 import { IPosition, Position } from 'vs/editor/common/core/position';
@@ -148,7 +148,7 @@ class Arrow {
 	show(where: IPosition): void {
 		this._decorations = this._editor.deltaDecorations(
 			this._decorations,
-			[{ range: Range.fromPositions(where), options: { className: this._ruleName, stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges } }]
+			[{ range: Range.fromPositions(where), options: { description: 'zone-widget-arrow', className: this._ruleName, stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges } }]
 		);
 	}
 
@@ -214,13 +214,13 @@ export abstract class ZoneWidget implements IHorizontalSashLayoutProvider {
 
 	create(): void {
 
-		dom.addClass(this.domNode, 'zone-widget');
+		this.domNode.classList.add('zone-widget');
 		if (this.options.className) {
-			dom.addClass(this.domNode, this.options.className);
+			this.domNode.classList.add(this.options.className);
 		}
 
 		this.container = document.createElement('div');
-		dom.addClass(this.container, 'zone-widget-container');
+		this.container.classList.add('zone-widget-container');
 		this.domNode.appendChild(this.container);
 		if (this.options.showArrow) {
 			this._arrow = new Arrow(this.editor);
@@ -254,13 +254,13 @@ export abstract class ZoneWidget implements IHorizontalSashLayoutProvider {
 	}
 
 	private _getWidth(info: EditorLayoutInfo): number {
-		return info.width - info.minimapWidth - info.verticalScrollbarWidth;
+		return info.width - info.minimap.minimapWidth - info.verticalScrollbarWidth;
 	}
 
 	private _getLeft(info: EditorLayoutInfo): number {
 		// If minimap is to the left, we move beyond it
-		if (info.minimapWidth > 0 && info.minimapLeft === 0) {
-			return info.minimapWidth;
+		if (info.minimap.minimapWidth > 0 && info.minimap.minimapLeft === 0) {
+			return info.minimap.minimapWidth;
 		}
 		return 0;
 	}
@@ -360,10 +360,8 @@ export abstract class ZoneWidget implements IHorizontalSashLayoutProvider {
 		const lineHeight = this.editor.getOption(EditorOption.lineHeight);
 
 		// adjust heightInLines to viewport
-		const maxHeightInLines = (this.editor.getLayoutInfo().height / lineHeight) * 0.8;
-		if (heightInLines >= maxHeightInLines) {
-			heightInLines = maxHeightInLines;
-		}
+		const maxHeightInLines = Math.max(12, (this.editor.getLayoutInfo().height / lineHeight) * 0.8);
+		heightInLines = Math.min(heightInLines, maxHeightInLines);
 
 		let arrowHeight = 0;
 		let frameThickness = 0;
@@ -453,7 +451,7 @@ export abstract class ZoneWidget implements IHorizontalSashLayoutProvider {
 			this.container.classList.remove(classToReplace);
 		}
 
-		dom.addClass(this.container, className);
+		this.container.classList.add(className);
 
 	}
 
@@ -528,6 +526,6 @@ export abstract class ZoneWidget implements IHorizontalSashLayoutProvider {
 
 	getHorizontalSashWidth() {
 		const layoutInfo = this.editor.getLayoutInfo();
-		return layoutInfo.width - layoutInfo.minimapWidth;
+		return layoutInfo.width - layoutInfo.minimap.minimapWidth;
 	}
 }

@@ -5,45 +5,47 @@
 
 import { alert } from 'vs/base/browser/ui/aria/aria';
 import { isNonEmptyArray } from 'vs/base/common/arrays';
+import { IdleValue } from 'vs/base/common/async';
+import { CancellationTokenSource } from 'vs/base/common/cancellation';
 import { onUnexpectedError } from 'vs/base/common/errors';
+import { Event } from 'vs/base/common/event';
 import { KeyCode, KeyMod, SimpleKeybinding } from 'vs/base/common/keyCodes';
-import { dispose, IDisposable, DisposableStore, toDisposable, MutableDisposable } from 'vs/base/common/lifecycle';
+import { DisposableStore, dispose, IDisposable, MutableDisposable, toDisposable } from 'vs/base/common/lifecycle';
+import * as platform from 'vs/base/common/platform';
+import { StopWatch } from 'vs/base/common/stopwatch';
+import { assertType, isObject } from 'vs/base/common/types';
+import { StableEditorScrollState } from 'vs/editor/browser/core/editorState';
 import { ICodeEditor } from 'vs/editor/browser/editorBrowser';
 import { EditorAction, EditorCommand, registerEditorAction, registerEditorCommand, registerEditorContribution, ServicesAccessor } from 'vs/editor/browser/editorExtensions';
+import { EditorOption } from 'vs/editor/common/config/editorOptions';
 import { EditOperation } from 'vs/editor/common/core/editOperation';
+import { IPosition, Position } from 'vs/editor/common/core/position';
 import { Range } from 'vs/editor/common/core/range';
 import { IEditorContribution, ScrollType } from 'vs/editor/common/editorCommon';
 import { EditorContextKeys } from 'vs/editor/common/editorContextKeys';
-import { CompletionItemProvider, CompletionItemInsertTextRule } from 'vs/editor/common/modes';
+import { ITextModel, TrackedRangeStickiness } from 'vs/editor/common/model';
+import { CompletionItemInsertTextRule, CompletionItemProvider } from 'vs/editor/common/modes';
 import { SnippetController2 } from 'vs/editor/contrib/snippet/snippetController2';
 import { SnippetParser } from 'vs/editor/contrib/snippet/snippetParser';
 import { ISuggestMemoryService } from 'vs/editor/contrib/suggest/suggestMemory';
+import { WordContextKey } from 'vs/editor/contrib/suggest/wordContextKey';
 import * as nls from 'vs/nls';
-import { ICommandService, CommandsRegistry } from 'vs/platform/commands/common/commands';
+import { MenuRegistry } from 'vs/platform/actions/common/actions';
+import { CommandsRegistry, ICommandService } from 'vs/platform/commands/common/commands';
 import { ContextKeyExpr, IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
-import { KeybindingWeight, KeybindingsRegistry } from 'vs/platform/keybinding/common/keybindingsRegistry';
-import { Context as SuggestContext, CompletionItem } from './suggest';
+import { KeybindingsRegistry, KeybindingWeight } from 'vs/platform/keybinding/common/keybindingsRegistry';
+import { ILogService } from 'vs/platform/log/common/log';
+import { CompletionItem, Context as SuggestContext, ISuggestItemPreselector, suggestWidgetStatusbarMenu } from './suggest';
 import { SuggestAlternatives } from './suggestAlternatives';
-import { State, SuggestModel } from './suggestModel';
-import { ISelectedSuggestion, SuggestWidget } from './suggestWidget';
-import { WordContextKey } from 'vs/editor/contrib/suggest/wordContextKey';
-import { Event } from 'vs/base/common/event';
-import { IEditorWorkerService } from 'vs/editor/common/services/editorWorkerService';
-import { IdleValue } from 'vs/base/common/async';
-import { isObject, assertType } from 'vs/base/common/types';
 import { CommitCharacterController } from './suggestCommitCharacters';
-import { IPosition } from 'vs/editor/common/core/position';
-import { TrackedRangeStickiness, ITextModel } from 'vs/editor/common/model';
-import { EditorOption } from 'vs/editor/common/config/editorOptions';
-import * as platform from 'vs/base/common/platform';
-import { SuggestRangeHighlighter } from 'vs/editor/contrib/suggest/suggestRangeHighlighter';
+import { State, SuggestModel } from './suggestModel';
+import { OvertypingCapturer } from './suggestOvertypingCapturer';
+import { ISelectedSuggestion, SuggestWidget } from './suggestWidget';
 
-/**
- * Stop suggest widget from disappearing when clicking into other areas
- * For development purpose only
- */
-const _sticky = false;
+// sticky suggest widget which doesn't disappear on focus out and such
+let _sticky = false;
+// _sticky = Boolean("true"); // done "weirdly" so that a lint warning prevents you from pushing this
 
 class LineSuffix {
 
@@ -59,7 +61,7 @@ class LineSuffix {
 			const end = _model.getPositionAt(offset + 1);
 			this._marker = _model.deltaDecorations([], [{
 				range: Range.fromPositions(_position, end),
-				options: { stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges }
+				options: { description: 'suggest-line-suffix', stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges }
 			}]);
 		}
 	}
@@ -109,19 +111,26 @@ export class SuggestController implements IEditorContribution {
 	private readonly _alternatives: IdleValue<SuggestAlternatives>;
 	private readonly _lineSuffix = new MutableDisposable<LineSuffix>();
 	private readonly _toDispose = new DisposableStore();
+	private readonly _overtypingCapturer: IdleValue<OvertypingCapturer>;
+	private readonly _selectors = new PriorityRegistry<ISuggestItemPreselector>(s => s.priority);
 
 	constructor(
 		editor: ICodeEditor,
-		@IEditorWorkerService editorWorker: IEditorWorkerService,
 		@ISuggestMemoryService private readonly _memoryService: ISuggestMemoryService,
 		@ICommandService private readonly _commandService: ICommandService,
 		@IContextKeyService private readonly _contextKeyService: IContextKeyService,
 		@IInstantiationService private readonly _instantiationService: IInstantiationService,
+		@ILogService private readonly _logService: ILogService,
 	) {
 		this.editor = editor;
-		this.model = new SuggestModel(this.editor, editorWorker);
+		this.model = _instantiationService.createInstance(SuggestModel, this.editor,);
 
-		this.widget = new IdleValue(() => {
+		// context key: update insert/replace mode
+		const ctxInsertMode = SuggestContext.InsertMode.bindTo(_contextKeyService);
+		ctxInsertMode.set(editor.getOption(EditorOption.suggest).insertMode);
+		this.model.onDidTrigger(() => ctxInsertMode.set(editor.getOption(EditorOption.suggest).insertMode));
+
+		this.widget = this._toDispose.add(new IdleValue(() => {
 
 			const widget = this._instantiationService.createInstance(SuggestWidget, this.editor);
 
@@ -138,9 +147,19 @@ export class SuggestController implements IEditorContribution {
 			}));
 
 			// Wire up makes text edit context key
-			let makesTextEdit = SuggestContext.MakesTextEdit.bindTo(this._contextKeyService);
+			const ctxMakesTextEdit = SuggestContext.MakesTextEdit.bindTo(this._contextKeyService);
+			const ctxHasInsertAndReplace = SuggestContext.HasInsertAndReplaceRange.bindTo(this._contextKeyService);
+			const ctxCanResolve = SuggestContext.CanResolve.bindTo(this._contextKeyService);
+
+			this._toDispose.add(toDisposable(() => {
+				ctxMakesTextEdit.reset();
+				ctxHasInsertAndReplace.reset();
+				ctxCanResolve.reset();
+			}));
+
 			this._toDispose.add(widget.onDidFocus(({ item }) => {
 
+				// (ctx: makesTextEdit)
 				const position = this.editor.getPosition()!;
 				const startColumn = item.editStart.column;
 				const endColumn = position.column;
@@ -161,55 +180,72 @@ export class SuggestController implements IEditorContribution {
 					});
 					value = oldText !== item.completion.insertText;
 				}
-				makesTextEdit.set(value);
+				ctxMakesTextEdit.set(value);
+
+				// (ctx: hasInsertAndReplaceRange)
+				ctxHasInsertAndReplace.set(!Position.equals(item.editInsertEnd, item.editReplaceEnd));
+
+				// (ctx: canResolve)
+				ctxCanResolve.set(Boolean(item.provider.resolveCompletionItem) || Boolean(item.completion.documentation) || item.completion.detail !== item.completion.label);
 			}));
-			this._toDispose.add(toDisposable(() => makesTextEdit.reset()));
 
+			this._toDispose.add(widget.onDetailsKeyDown(e => {
+				// cmd + c on macOS, ctrl + c on Win / Linux
+				if (
+					e.toKeybinding().equals(new SimpleKeybinding(true, false, false, false, KeyCode.KEY_C)) ||
+					(platform.isMacintosh && e.toKeybinding().equals(new SimpleKeybinding(false, false, false, true, KeyCode.KEY_C)))
+				) {
+					e.stopPropagation();
+					return;
+				}
 
+				if (!e.toKeybinding().isModifierKey()) {
+					this.editor.focus();
+				}
+			}));
 
 			return widget;
-		});
+		}));
 
-		this._alternatives = new IdleValue(() => {
+		// Wire up text overtyping capture
+		this._overtypingCapturer = this._toDispose.add(new IdleValue(() => {
+			return this._toDispose.add(new OvertypingCapturer(this.editor, this.model));
+		}));
+
+		this._alternatives = this._toDispose.add(new IdleValue(() => {
 			return this._toDispose.add(new SuggestAlternatives(this.editor, this._contextKeyService));
-		});
+		}));
 
 		this._toDispose.add(_instantiationService.createInstance(WordContextKey, editor));
 
 		this._toDispose.add(this.model.onDidTrigger(e => {
-			this.widget.getValue().showTriggered(e.auto, e.shy ? 250 : 50);
+			this.widget.value.showTriggered(e.auto, e.shy ? 250 : 50);
 			this._lineSuffix.value = new LineSuffix(this.editor.getModel()!, e.position);
 		}));
 		this._toDispose.add(this.model.onDidSuggest(e => {
 			if (!e.shy) {
-				let index = this._memoryService.select(this.editor.getModel()!, this.editor.getPosition()!, e.completionModel.items);
-				this.widget.getValue().showSuggestions(e.completionModel, index, e.isFrozen, e.auto);
+				let index = -1;
+				for (const selector of this._selectors.itemsOrderedByPriorityDesc) {
+					index = selector.select(this.editor.getModel()!, this.editor.getPosition()!, e.completionModel.items);
+					if (index !== -1) {
+						break;
+					}
+				}
+				if (index === -1) {
+					index = this._memoryService.select(this.editor.getModel()!, this.editor.getPosition()!, e.completionModel.items);
+				}
+				this.widget.value.showSuggestions(e.completionModel, index, e.isFrozen, e.auto);
 			}
 		}));
 		this._toDispose.add(this.model.onDidCancel(e => {
 			if (!e.retrigger) {
-				this.widget.getValue().hideWidget();
+				this.widget.value.hideWidget();
 			}
 		}));
 		this._toDispose.add(this.editor.onDidBlurEditorWidget(() => {
 			if (!_sticky) {
 				this.model.cancel();
 				this.model.clear();
-			}
-		}));
-
-		this._toDispose.add(this.widget.getValue().onDetailsKeyDown(e => {
-			// cmd + c on macOS, ctrl + c on Win / Linux
-			if (
-				e.toKeybinding().equals(new SimpleKeybinding(true, false, false, false, KeyCode.KEY_C)) ||
-				(platform.isMacintosh && e.toKeybinding().equals(new SimpleKeybinding(false, false, false, true, KeyCode.KEY_C)))
-			) {
-				e.stopPropagation();
-				return;
-			}
-
-			if (!e.toKeybinding().isModifierKey()) {
-				this.editor.focus();
 			}
 		}));
 
@@ -221,9 +257,6 @@ export class SuggestController implements IEditorContribution {
 		};
 		this._toDispose.add(this.editor.onDidChangeConfiguration(() => updateFromConfig()));
 		updateFromConfig();
-
-		// create range highlighter
-		this._toDispose.add(new SuggestRangeHighlighter(this));
 	}
 
 	dispose(): void {
@@ -239,7 +272,7 @@ export class SuggestController implements IEditorContribution {
 		flags: InsertFlags
 	): void {
 		if (!event || !event.item) {
-			this._alternatives.getValue().reset();
+			this._alternatives.value.reset();
 			this.model.cancel();
 			this.model.clear();
 			return;
@@ -251,7 +284,10 @@ export class SuggestController implements IEditorContribution {
 		const model = this.editor.getModel();
 		const modelVersionNow = model.getAlternativeVersionId();
 		const { item } = event;
-		const { completion: suggestion } = item;
+
+		//
+		const tasks: Promise<any>[] = [];
+		const cts = new CancellationTokenSource();
 
 		// pushing undo stops *before* additional text edits and
 		// *after* the main edit
@@ -259,51 +295,118 @@ export class SuggestController implements IEditorContribution {
 			this.editor.pushUndoStop();
 		}
 
-		if (Array.isArray(suggestion.additionalTextEdits)) {
-			this.editor.executeEdits('suggestController.additionalTextEdits', suggestion.additionalTextEdits.map(edit => EditOperation.replace(Range.lift(edit.range), edit.text)));
-		}
+		// compute overwrite[Before|After] deltas BEFORE applying extra edits
+		const info = this.getOverwriteInfo(item, Boolean(flags & InsertFlags.AlternativeOverwriteConfig));
 
 		// keep item in memory
 		this._memoryService.memorize(model, this.editor.getPosition(), item);
 
-		let { insertText } = suggestion;
-		if (!(suggestion.insertTextRules! & CompletionItemInsertTextRule.InsertAsSnippet)) {
-			insertText = SnippetParser.escape(insertText);
+
+		if (Array.isArray(item.completion.additionalTextEdits)) {
+			// sync additional edits
+			const scrollState = StableEditorScrollState.capture(this.editor);
+			this.editor.executeEdits(
+				'suggestController.additionalTextEdits.sync',
+				item.completion.additionalTextEdits.map(edit => EditOperation.replace(Range.lift(edit.range), edit.text))
+			);
+			scrollState.restoreRelativeVerticalPositionOfCursor(this.editor);
+
+		} else if (!item.isResolved) {
+			// async additional edits
+			const sw = new StopWatch(true);
+			let position: IPosition | undefined;
+
+			const docListener = model.onDidChangeContent(e => {
+				if (e.isFlush) {
+					cts.cancel();
+					docListener.dispose();
+					return;
+				}
+				for (let change of e.changes) {
+					const thisPosition = Range.getEndPosition(change.range);
+					if (!position || Position.isBefore(thisPosition, position)) {
+						position = thisPosition;
+					}
+				}
+			});
+
+			let oldFlags = flags;
+			flags |= InsertFlags.NoAfterUndoStop;
+			let didType = false;
+			let typeListener = this.editor.onWillType(() => {
+				typeListener.dispose();
+				didType = true;
+				if (!(oldFlags & InsertFlags.NoAfterUndoStop)) {
+					this.editor.pushUndoStop();
+				}
+			});
+
+			tasks.push(item.resolve(cts.token).then(() => {
+				if (!item.completion.additionalTextEdits || cts.token.isCancellationRequested) {
+					return false;
+				}
+				if (position && item.completion.additionalTextEdits.some(edit => Position.isBefore(position!, Range.getStartPosition(edit.range)))) {
+					return false;
+				}
+				if (didType) {
+					this.editor.pushUndoStop();
+				}
+				const scrollState = StableEditorScrollState.capture(this.editor);
+				this.editor.executeEdits(
+					'suggestController.additionalTextEdits.async',
+					item.completion.additionalTextEdits.map(edit => EditOperation.replace(Range.lift(edit.range), edit.text))
+				);
+				scrollState.restoreRelativeVerticalPositionOfCursor(this.editor);
+				if (didType || !(oldFlags & InsertFlags.NoAfterUndoStop)) {
+					this.editor.pushUndoStop();
+				}
+				return true;
+			}).then(applied => {
+				this._logService.trace('[suggest] async resolving of edits DONE (ms, applied?)', sw.elapsed(), applied);
+				docListener.dispose();
+				typeListener.dispose();
+			}));
 		}
 
-		const info = this.getOverwriteInfo(item, Boolean(flags & InsertFlags.AlternativeOverwriteConfig));
+		let { insertText } = item.completion;
+		if (!(item.completion.insertTextRules! & CompletionItemInsertTextRule.InsertAsSnippet)) {
+			insertText = SnippetParser.escape(insertText);
+		}
 
 		SnippetController2.get(this.editor).insert(insertText, {
 			overwriteBefore: info.overwriteBefore,
 			overwriteAfter: info.overwriteAfter,
 			undoStopBefore: false,
 			undoStopAfter: false,
-			adjustWhitespace: !(suggestion.insertTextRules! & CompletionItemInsertTextRule.KeepWhitespace)
+			adjustWhitespace: !(item.completion.insertTextRules! & CompletionItemInsertTextRule.KeepWhitespace),
+			clipboardText: event.model.clipboardText,
+			overtypingCapturer: this._overtypingCapturer.value
 		});
 
 		if (!(flags & InsertFlags.NoAfterUndoStop)) {
 			this.editor.pushUndoStop();
 		}
 
-		if (!suggestion.command) {
+		if (!item.completion.command) {
 			// done
 			this.model.cancel();
-			this.model.clear();
 
-		} else if (suggestion.command.id === TriggerSuggestAction.id) {
+		} else if (item.completion.command.id === TriggerSuggestAction.id) {
 			// retigger
 			this.model.trigger({ auto: true, shy: false }, true);
 
 		} else {
 			// exec command, done
-			this._commandService.executeCommand(suggestion.command.id, ...(suggestion.command.arguments ? [...suggestion.command.arguments] : []))
-				.catch(onUnexpectedError)
-				.finally(() => this.model.clear()); // <- clear only now, keep commands alive
+			tasks.push(this._commandService.executeCommand(item.completion.command.id, ...(item.completion.command.arguments ? [...item.completion.command.arguments] : [])).catch(onUnexpectedError));
 			this.model.cancel();
 		}
 
 		if (flags & InsertFlags.KeepAlternativeSuggestions) {
-			this._alternatives.getValue().set(event, next => {
+			this._alternatives.value.set(event, next => {
+
+				// cancel resolving of additional edits
+				cts.cancel();
+
 				// this is not so pretty. when inserting the 'next'
 				// suggestion we undo until we are at the state at
 				// which we were before inserting the previous suggestion...
@@ -320,7 +423,13 @@ export class SuggestController implements IEditorContribution {
 			});
 		}
 
-		this._alertCompletionItem(event.item);
+		this._alertCompletionItem(item);
+
+		// clear only now - after all tasks are done
+		Promise.all(tasks).finally(() => {
+			this.model.clear();
+			cts.dispose();
+		});
 	}
 
 	getOverwriteInfo(item: CompletionItem, toggleMode: boolean): { overwriteBefore: number, overwriteAfter: number } {
@@ -341,9 +450,9 @@ export class SuggestController implements IEditorContribution {
 		};
 	}
 
-	private _alertCompletionItem({ completion: suggestion }: CompletionItem): void {
-		if (isNonEmptyArray(suggestion.additionalTextEdits)) {
-			let msg = nls.localize('arai.alert.snippet', "Accepting '{0}' made {1} additional edits", suggestion.label, suggestion.additionalTextEdits.length);
+	private _alertCompletionItem(item: CompletionItem): void {
+		if (isNonEmptyArray(item.completion.additionalTextEdits)) {
+			let msg = nls.localize('aria.alert.snippet', "Accepting '{0}' made {1} additional edits", item.textLabel, item.completion.additionalTextEdits.length);
 			alert(msg);
 		}
 	}
@@ -425,7 +534,7 @@ export class SuggestController implements IEditorContribution {
 	}
 
 	acceptSelectedSuggestion(keepAlternativeSuggestions: boolean, alternativeOverwriteConfig: boolean): void {
-		const item = this.widget.getValue().getFocusedItem();
+		const item = this.widget.value.getFocusedItem();
 		let flags = 0;
 		if (keepAlternativeSuggestions) {
 			flags |= InsertFlags.KeepAlternativeSuggestions;
@@ -435,55 +544,101 @@ export class SuggestController implements IEditorContribution {
 		}
 		this._insertSuggestion(item, flags);
 	}
-
 	acceptNextSuggestion() {
-		this._alternatives.getValue().next();
+		this._alternatives.value.next();
 	}
 
 	acceptPrevSuggestion() {
-		this._alternatives.getValue().prev();
+		this._alternatives.value.prev();
 	}
 
 	cancelSuggestWidget(): void {
 		this.model.cancel();
 		this.model.clear();
-		this.widget.getValue().hideWidget();
+		this.widget.value.hideWidget();
 	}
 
 	selectNextSuggestion(): void {
-		this.widget.getValue().selectNext();
+		this.widget.value.selectNext();
 	}
 
 	selectNextPageSuggestion(): void {
-		this.widget.getValue().selectNextPage();
+		this.widget.value.selectNextPage();
 	}
 
 	selectLastSuggestion(): void {
-		this.widget.getValue().selectLast();
+		this.widget.value.selectLast();
 	}
 
 	selectPrevSuggestion(): void {
-		this.widget.getValue().selectPrevious();
+		this.widget.value.selectPrevious();
 	}
 
 	selectPrevPageSuggestion(): void {
-		this.widget.getValue().selectPreviousPage();
+		this.widget.value.selectPreviousPage();
 	}
 
 	selectFirstSuggestion(): void {
-		this.widget.getValue().selectFirst();
+		this.widget.value.selectFirst();
 	}
 
 	toggleSuggestionDetails(): void {
-		this.widget.getValue().toggleDetails();
+		this.widget.value.toggleDetails();
 	}
 
 	toggleExplainMode(): void {
-		this.widget.getValue().toggleExplainMode();
+		this.widget.value.toggleExplainMode();
 	}
 
 	toggleSuggestionFocus(): void {
-		this.widget.getValue().toggleDetailsFocus();
+		this.widget.value.toggleDetailsFocus();
+	}
+
+	resetWidgetSize(): void {
+		this.widget.value.resetPersistedSize();
+	}
+
+	forceRenderingAbove() {
+		this.widget.value.forceRenderingAbove();
+	}
+
+	stopForceRenderingAbove() {
+		if (!this.widget.isInitialized) {
+			// This method has no effect if the widget is not initialized yet.
+			return;
+		}
+		this.widget.value.stopForceRenderingAbove();
+	}
+
+	registerSelector(selector: ISuggestItemPreselector): IDisposable {
+		return this._selectors.register(selector);
+	}
+}
+
+class PriorityRegistry<T> {
+	private readonly _items = new Array<T>();
+
+	constructor(private readonly prioritySelector: (item: T) => number) { }
+
+	register(value: T): IDisposable {
+		if (this._items.indexOf(value) !== -1) {
+			throw new Error('Value is already registered');
+		}
+		this._items.push(value);
+		this._items.sort((s1, s2) => this.prioritySelector(s2) - this.prioritySelector(s1));
+
+		return {
+			dispose: () => {
+				const idx = this._items.indexOf(value);
+				if (idx >= 0) {
+					this._items.splice(idx, 1);
+				}
+			}
+		};
+	}
+
+	get itemsOrderedByPriorityDesc(): readonly T[] {
+		return this._items;
 	}
 }
 
@@ -500,7 +655,8 @@ export class TriggerSuggestAction extends EditorAction {
 			kbOpts: {
 				kbExpr: EditorContextKeys.textInputFocus,
 				primary: KeyMod.CtrlCmd | KeyCode.Space,
-				mac: { primary: KeyMod.WinCtrl | KeyCode.Space, secondary: [KeyMod.Alt | KeyCode.Escape] },
+				secondary: [KeyMod.CtrlCmd | KeyCode.KEY_I],
+				mac: { primary: KeyMod.WinCtrl | KeyCode.Space, secondary: [KeyMod.Alt | KeyCode.Escape, KeyMod.CtrlCmd | KeyCode.KEY_I] },
 				weight: KeybindingWeight.EditorContrib
 			}
 		});
@@ -528,11 +684,8 @@ const SuggestCommand = EditorCommand.bindToContribution<SuggestController>(Sugge
 registerEditorCommand(new SuggestCommand({
 	id: 'acceptSelectedSuggestion',
 	precondition: SuggestContext.Visible,
-	handler(x, args) {
-		const alternative: boolean = typeof args === 'object' && typeof args.alternative === 'boolean'
-			? args.alternative
-			: false;
-		x.acceptSelectedSuggestion(true, alternative);
+	handler(x) {
+		x.acceptSelectedSuggestion(true, false);
 	}
 }));
 
@@ -549,19 +702,55 @@ KeybindingsRegistry.registerKeybindingRule({
 	id: 'acceptSelectedSuggestion',
 	when: ContextKeyExpr.and(SuggestContext.Visible, EditorContextKeys.textInputFocus, SuggestContext.AcceptSuggestionsOnEnter, SuggestContext.MakesTextEdit),
 	primary: KeyCode.Enter,
-	weight
+	weight,
 });
 
-// shift+enter and shift+tab use the alternative-flag so that the suggest controller
-// is doing the opposite of the editor.suggest.overwriteOnAccept-configuration
-KeybindingsRegistry.registerKeybindingRule({
-	id: 'acceptSelectedSuggestion',
-	when: ContextKeyExpr.and(SuggestContext.Visible, EditorContextKeys.textInputFocus),
-	primary: KeyMod.Shift | KeyCode.Tab,
-	secondary: [KeyMod.Shift | KeyCode.Enter],
-	args: { alternative: true },
-	weight
+MenuRegistry.appendMenuItem(suggestWidgetStatusbarMenu, {
+	command: { id: 'acceptSelectedSuggestion', title: nls.localize('accept.insert', "Insert") },
+	group: 'left',
+	order: 1,
+	when: SuggestContext.HasInsertAndReplaceRange.toNegated()
 });
+MenuRegistry.appendMenuItem(suggestWidgetStatusbarMenu, {
+	command: { id: 'acceptSelectedSuggestion', title: nls.localize('accept.insert', "Insert") },
+	group: 'left',
+	order: 1,
+	when: ContextKeyExpr.and(SuggestContext.HasInsertAndReplaceRange, SuggestContext.InsertMode.isEqualTo('insert'))
+});
+MenuRegistry.appendMenuItem(suggestWidgetStatusbarMenu, {
+	command: { id: 'acceptSelectedSuggestion', title: nls.localize('accept.replace', "Replace") },
+	group: 'left',
+	order: 1,
+	when: ContextKeyExpr.and(SuggestContext.HasInsertAndReplaceRange, SuggestContext.InsertMode.isEqualTo('replace'))
+});
+
+registerEditorCommand(new SuggestCommand({
+	id: 'acceptAlternativeSelectedSuggestion',
+	precondition: ContextKeyExpr.and(SuggestContext.Visible, EditorContextKeys.textInputFocus),
+	kbOpts: {
+		weight: weight,
+		kbExpr: EditorContextKeys.textInputFocus,
+		primary: KeyMod.Shift | KeyCode.Enter,
+		secondary: [KeyMod.Shift | KeyCode.Tab],
+	},
+	handler(x) {
+		x.acceptSelectedSuggestion(false, true);
+	},
+	menuOpts: [{
+		menuId: suggestWidgetStatusbarMenu,
+		group: 'left',
+		order: 2,
+		when: ContextKeyExpr.and(SuggestContext.HasInsertAndReplaceRange, SuggestContext.InsertMode.isEqualTo('insert')),
+		title: nls.localize('accept.replace', "Replace")
+	}, {
+		menuId: suggestWidgetStatusbarMenu,
+		group: 'left',
+		order: 2,
+		when: ContextKeyExpr.and(SuggestContext.HasInsertAndReplaceRange, SuggestContext.InsertMode.isEqualTo('replace')),
+		title: nls.localize('accept.insert', "Insert")
+	}]
+}));
+
 
 // continue to support the old command
 CommandsRegistry.registerCommandAlias('acceptSelectedSuggestionOnEnter', 'acceptSelectedSuggestion');
@@ -648,8 +837,22 @@ registerEditorCommand(new SuggestCommand({
 		weight: weight,
 		kbExpr: EditorContextKeys.textInputFocus,
 		primary: KeyMod.CtrlCmd | KeyCode.Space,
-		mac: { primary: KeyMod.WinCtrl | KeyCode.Space }
-	}
+		secondary: [KeyMod.CtrlCmd | KeyCode.KEY_I],
+		mac: { primary: KeyMod.WinCtrl | KeyCode.Space, secondary: [KeyMod.CtrlCmd | KeyCode.KEY_I] }
+	},
+	menuOpts: [{
+		menuId: suggestWidgetStatusbarMenu,
+		group: 'right',
+		order: 1,
+		when: ContextKeyExpr.and(SuggestContext.DetailsVisible, SuggestContext.CanResolve),
+		title: nls.localize('detail.more', "show less")
+	}, {
+		menuId: suggestWidgetStatusbarMenu,
+		group: 'right',
+		order: 1,
+		when: ContextKeyExpr.and(SuggestContext.DetailsVisible.toNegated(), SuggestContext.CanResolve),
+		title: nls.localize('detail.less', "show more")
+	}]
 }));
 
 registerEditorCommand(new SuggestCommand({
@@ -679,6 +882,7 @@ registerEditorCommand(new SuggestCommand({
 registerEditorCommand(new SuggestCommand({
 	id: 'insertBestCompletion',
 	precondition: ContextKeyExpr.and(
+		EditorContextKeys.textInputFocus,
 		ContextKeyExpr.equals('config.editor.tabCompletion', 'on'),
 		WordContextKey.AtEnd,
 		SuggestContext.Visible.toNegated(),
@@ -698,6 +902,7 @@ registerEditorCommand(new SuggestCommand({
 registerEditorCommand(new SuggestCommand({
 	id: 'insertNextSuggestion',
 	precondition: ContextKeyExpr.and(
+		EditorContextKeys.textInputFocus,
 		ContextKeyExpr.equals('config.editor.tabCompletion', 'on'),
 		SuggestAlternatives.OtherSuggestions,
 		SuggestContext.Visible.toNegated(),
@@ -714,6 +919,7 @@ registerEditorCommand(new SuggestCommand({
 registerEditorCommand(new SuggestCommand({
 	id: 'insertPrevSuggestion',
 	precondition: ContextKeyExpr.and(
+		EditorContextKeys.textInputFocus,
 		ContextKeyExpr.equals('config.editor.tabCompletion', 'on'),
 		SuggestAlternatives.OtherSuggestions,
 		SuggestContext.Visible.toNegated(),
@@ -726,3 +932,20 @@ registerEditorCommand(new SuggestCommand({
 		primary: KeyMod.Shift | KeyCode.Tab
 	}
 }));
+
+
+registerEditorAction(class extends EditorAction {
+
+	constructor() {
+		super({
+			id: 'editor.action.resetSuggestSize',
+			label: nls.localize('suggest.reset.label', "Reset Suggest Widget Size"),
+			alias: 'Reset Suggest Widget Size',
+			precondition: undefined
+		});
+	}
+
+	run(_accessor: ServicesAccessor, editor: ICodeEditor): void {
+		SuggestController.get(editor).resetWidgetSize();
+	}
+});

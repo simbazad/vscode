@@ -5,21 +5,29 @@
 
 .monaco-workbench .part.activitybar {
 	width: 48px;
+	height: 100%;
 }
 
-.monaco-workbench.windows.chromium .part.activitybar,
-.monaco-workbench.linux.chromium .part.activitybar {
-	/*
-	 * Explicitly put the part onto its own layer to help Chrome to
-	 * render the content with LCD-anti-aliasing. By partioning the
-	 * workbench into multiple layers, we can ensure that a bad
-	 * behaving part is not making another part fallback to greyscale
-	 * rendering.
-	 *
-	 * macOS: does not render LCD-anti-aliased.
-	 */
-	transform: translate3d(0px, 0px, 0px);
-	overflow: visible; /* when a new layer is created, we need to set overflow visible to avoid clipping the menubar */
+.monaco-workbench .activitybar.bordered::before {
+	content: '';
+	float: left;
+	position: absolute;
+	box-sizing: border-box;
+	height: 100%;
+	width: 0px;
+	border-color: inherit;
+}
+
+.monaco-workbench .activitybar.left.bordered::before {
+	right: 0;
+	border-right-style: solid;
+	border-right-width: 1px;
+}
+
+.monaco-workbench .activitybar.right.bordered::before {
+	left: 0;
+	border-left-style: solid;
+	border-left-width: 1px;
 }
 
 .monaco-workbench .activitybar > .content {
@@ -28,6 +36,16 @@
 	flex-direction: column;
 	justify-content: space-between;
 }
+
+/*
+ * Fix menu jumping and background inheritance in Safari
+ */
+.monaco-workbench.safari .activitybar > .content {
+	position: absolute;
+	background-color: inherit;
+}
+
+/** Viewlet Switcher */
 
 .monaco-workbench .activitybar > .content .monaco-action-bar {
 	text-align: left;
@@ -41,6 +59,8 @@
 .monaco-workbench .activitybar > .content > .composite-bar {
 	margin-bottom: auto;
 }
+
+/** Menu Bar */
 
 .monaco-workbench .activitybar .menubar {
 	width: 100%;

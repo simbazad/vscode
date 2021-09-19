@@ -12,8 +12,7 @@ import { BinarySizeStatusBarEntry } from './binarySizeStatusBarEntry';
 
 const localize = nls.loadMessageBundle();
 
-
-export class PreviewManager implements vscode.WebviewEditorProvider {
+export class PreviewManager implements vscode.CustomReadonlyEditorProvider {
 
 	public static readonly viewType = 'imagePreview.previewEditor';
 
@@ -27,11 +26,15 @@ export class PreviewManager implements vscode.WebviewEditorProvider {
 		private readonly zoomStatusBarEntry: ZoomStatusBarEntry,
 	) { }
 
-	public async resolveWebviewEditor(
-		input: { readonly resource: vscode.Uri, },
+	public async openCustomDocument(uri: vscode.Uri) {
+		return { uri, dispose: () => { } };
+	}
+
+	public async resolveCustomEditor(
+		document: vscode.CustomDocument,
 		webviewEditor: vscode.WebviewPanel,
-	): Promise<vscode.WebviewEditorCapabilities> {
-		const preview = new Preview(this.extensionRoot, input.resource, webviewEditor, this.sizeStatusBarEntry, this.binarySizeStatusBarEntry, this.zoomStatusBarEntry);
+	): Promise<void> {
+		const preview = new Preview(this.extensionRoot, document.uri, webviewEditor, this.sizeStatusBarEntry, this.binarySizeStatusBarEntry, this.zoomStatusBarEntry);
 		this._previews.add(preview);
 		this.setActivePreview(preview);
 
@@ -44,8 +47,6 @@ export class PreviewManager implements vscode.WebviewEditorProvider {
 				this.setActivePreview(undefined);
 			}
 		});
-
-		return {};
 	}
 
 	public get activePreview() { return this._activePreview; }
@@ -75,6 +76,8 @@ class Preview extends Disposable {
 	private _imageBinarySize: number | undefined;
 	private _imageZoom: Scale | undefined;
 
+	private readonly emptyPngDataUri = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR42gEFAPr/AP///wAI/AL+Sr4t6gAAAABJRU5ErkJggg==';
+
 	constructor(
 		private readonly extensionRoot: vscode.Uri,
 		private readonly resource: vscode.Uri,
@@ -90,6 +93,7 @@ class Preview extends Disposable {
 
 		webviewEditor.webview.options = {
 			enableScripts: true,
+			enableForms: false,
 			localResourceRoots: [
 				resourceRoot,
 				extensionRoot,
@@ -108,6 +112,12 @@ class Preview extends Disposable {
 					{
 						this._imageZoom = message.value;
 						this.update();
+						break;
+					}
+
+				case 'reopen-as-text':
+					{
+						vscode.commands.executeCommand('vscode.openWith', resource, 'default', webviewEditor.viewColumn);
 						break;
 					}
 			}
@@ -167,9 +177,9 @@ class Preview extends Disposable {
 		}
 	}
 
-	private render() {
+	private async render() {
 		if (this._previewState !== PreviewState.Disposed) {
-			this.webviewEditor.webview.html = this.getWebiewContents();
+			this.webviewEditor.webview.html = await this.getWebviewContents();
 		}
 	}
 
@@ -193,15 +203,16 @@ class Preview extends Disposable {
 		}
 	}
 
-	private getWebiewContents(): string {
+	private async getWebviewContents(): Promise<string> {
 		const version = Date.now().toString();
 		const settings = {
-			isMac: process.platform === 'darwin',
-			src: this.getResourcePath(this.webviewEditor, this.resource, version),
+			isMac: isMac(),
+			src: await this.getResourcePath(this.webviewEditor, this.resource, version),
 		};
 
-		const nonce = Date.now().toString();
+		const nonce = getNonce();
 
+		const cspSource = this.webviewEditor.webview.cspSource;
 		return /* html */`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -215,33 +226,33 @@ class Preview extends Disposable {
 
 	<link rel="stylesheet" href="${escapeAttribute(this.extensionResource('/media/main.css'))}" type="text/css" media="screen" nonce="${nonce}">
 
-	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data: ${this.webviewEditor.webview.cspSource}; script-src 'nonce-${nonce}'; style-src 'self' 'nonce-${nonce}';">
+	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: ${cspSource}; script-src 'nonce-${nonce}'; style-src ${cspSource} 'nonce-${nonce}';">
 	<meta id="image-preview-settings" data-settings="${escapeAttribute(JSON.stringify(settings))}">
 </head>
 <body class="container image scale-to-fit loading">
 	<div class="loading-indicator"></div>
-	<div class="image-load-error-message">${localize('preview.imageLoadError', "An error occurred while loading the image")}</div>
+	<div class="image-load-error">
+		<p>${localize('preview.imageLoadError', "An error occurred while loading the image.")}</p>
+		<a href="#" class="open-file-link">${localize('preview.imageLoadErrorLink', "Open file using VS Code's standard text/binary editor?")}</a>
+	</div>
 	<script src="${escapeAttribute(this.extensionResource('/media/main.js'))}" nonce="${nonce}"></script>
 </body>
 </html>`;
 	}
 
-	private getResourcePath(webviewEditor: vscode.WebviewPanel, resource: vscode.Uri, version: string) {
-		switch (resource.scheme) {
-			case 'data':
-				return resource.toString(true);
-
-			case 'git':
-				// Show blank image
-				return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR42gEFAPr/AP///wAI/AL+Sr4t6gAAAABJRU5ErkJggg==';
-
-			default:
-				// Avoid adding cache busting if there is already a query string
-				if (resource.query) {
-					return webviewEditor.webview.asWebviewUri(resource).toString(true);
-				}
-				return webviewEditor.webview.asWebviewUri(resource).with({ query: `version=${version}` }).toString(true);
+	private async getResourcePath(webviewEditor: vscode.WebviewPanel, resource: vscode.Uri, version: string): Promise<string> {
+		if (resource.scheme === 'git') {
+			const stat = await vscode.workspace.fs.stat(resource);
+			if (stat.size === 0) {
+				return this.emptyPngDataUri;
+			}
 		}
+
+		// Avoid adding cache busting if there is already a query string
+		if (resource.query) {
+			return webviewEditor.webview.asWebviewUri(resource).toString();
+		}
+		return webviewEditor.webview.asWebviewUri(resource).with({ query: `version=${version}` }).toString();
 	}
 
 	private extensionResource(path: string) {
@@ -251,6 +262,24 @@ class Preview extends Disposable {
 	}
 }
 
+declare const process: undefined | { readonly platform: string };
+
+function isMac(): boolean {
+	if (typeof process === 'undefined') {
+		return false;
+	}
+	return process.platform === 'darwin';
+}
+
 function escapeAttribute(value: string | vscode.Uri): string {
 	return value.toString().replace(/"/g, '&quot;');
+}
+
+function getNonce() {
+	let text = '';
+	const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+	for (let i = 0; i < 64; i++) {
+		text += possible.charAt(Math.floor(Math.random() * possible.length));
+	}
+	return text;
 }

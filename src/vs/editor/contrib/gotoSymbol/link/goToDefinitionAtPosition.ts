@@ -3,32 +3,36 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import 'vs/css!./goToDefinitionAtPosition';
-import * as nls from 'vs/nls';
-import { createCancelablePromise, CancelablePromise } from 'vs/base/common/async';
+import { IKeyboardEvent } from 'vs/base/browser/keyboardEvent';
+import { CancelablePromise, createCancelablePromise } from 'vs/base/common/async';
 import { CancellationToken } from 'vs/base/common/cancellation';
 import { onUnexpectedError } from 'vs/base/common/errors';
 import { MarkdownString } from 'vs/base/common/htmlContent';
-import { IModeService } from 'vs/editor/common/services/modeService';
-import { Range, IRange } from 'vs/editor/common/core/range';
-import * as editorCommon from 'vs/editor/common/editorCommon';
-import { DefinitionProviderRegistry, LocationLink } from 'vs/editor/common/modes';
+import { DisposableStore } from 'vs/base/common/lifecycle';
+import { withNullAsUndefined } from 'vs/base/common/types';
+import 'vs/css!./goToDefinitionAtPosition';
+import { CodeEditorStateFlag, EditorState } from 'vs/editor/browser/core/editorState';
 import { ICodeEditor, MouseTargetType } from 'vs/editor/browser/editorBrowser';
 import { registerEditorContribution } from 'vs/editor/browser/editorExtensions';
-import { getDefinitionsAtPosition } from '../goToSymbol';
-import { DisposableStore } from 'vs/base/common/lifecycle';
-import { ITextModelService } from 'vs/editor/common/services/resolverService';
-import { registerThemingParticipant } from 'vs/platform/theme/common/themeService';
-import { editorActiveLinkForeground } from 'vs/platform/theme/common/colorRegistry';
-import { EditorState, CodeEditorStateFlag } from 'vs/editor/browser/core/editorState';
-import { DefinitionAction } from '../goToCommands';
-import { ClickLinkGesture, ClickLinkMouseEvent, ClickLinkKeyboardEvent } from 'vs/editor/contrib/gotoSymbol/link/clickLinkGesture';
-import { IWordAtPosition, IModelDeltaDecoration, ITextModel, IFoundBracket } from 'vs/editor/common/model';
+import { EditorOption } from 'vs/editor/common/config/editorOptions';
 import { Position } from 'vs/editor/common/core/position';
-import { withNullAsUndefined } from 'vs/base/common/types';
-import { IKeyboardEvent } from 'vs/base/browser/keyboardEvent';
+import { IRange, Range } from 'vs/editor/common/core/range';
+import { IEditorContribution } from 'vs/editor/common/editorCommon';
+import { IFoundBracket, IModelDeltaDecoration, ITextModel, IWordAtPosition } from 'vs/editor/common/model';
+import { DefinitionProviderRegistry, LocationLink } from 'vs/editor/common/modes';
+import { IModeService } from 'vs/editor/common/services/modeService';
+import { ITextModelService } from 'vs/editor/common/services/resolverService';
+import { ClickLinkGesture, ClickLinkKeyboardEvent, ClickLinkMouseEvent } from 'vs/editor/contrib/gotoSymbol/link/clickLinkGesture';
+import { PeekContext } from 'vs/editor/contrib/peekView/peekView';
+import * as nls from 'vs/nls';
+import { IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
+import { ServicesAccessor } from 'vs/platform/instantiation/common/instantiation';
+import { editorActiveLinkForeground } from 'vs/platform/theme/common/colorRegistry';
+import { registerThemingParticipant } from 'vs/platform/theme/common/themeService';
+import { DefinitionAction } from '../goToCommands';
+import { getDefinitionsAtPosition } from '../goToSymbol';
 
-export class GotoDefinitionAtPositionEditorContribution implements editorCommon.IEditorContribution {
+export class GotoDefinitionAtPositionEditorContribution implements IEditorContribution {
 
 	public static readonly ID = 'editor.contrib.gotodefinitionatposition';
 	static readonly MAX_SOURCE_PREVIEW_LINES = 8;
@@ -301,6 +305,7 @@ export class GotoDefinitionAtPositionEditorContribution implements editorCommon.
 		const newDecorations: IModelDeltaDecoration = {
 			range: range,
 			options: {
+				description: 'goto-definition-link',
 				inlineClassName: 'goto-definition-link',
 				hoverMessage
 			}
@@ -334,8 +339,16 @@ export class GotoDefinitionAtPositionEditorContribution implements editorCommon.
 
 	private gotoDefinition(position: Position, openToSide: boolean): Promise<any> {
 		this.editor.setPosition(position);
-		const action = new DefinitionAction({ openToSide, openInPeek: false, muteMessage: true }, { alias: '', label: '', id: '', precondition: undefined });
-		return this.editor.invokeWithinContext(accessor => action.run(accessor, this.editor));
+		return this.editor.invokeWithinContext((accessor) => {
+			const canPeek = !openToSide && this.editor.getOption(EditorOption.definitionLinkOpensInPeek) && !this.isInPeekEditor(accessor);
+			const action = new DefinitionAction({ openToSide, openInPeek: canPeek, muteMessage: true }, { alias: '', label: '', id: '', precondition: undefined });
+			return action.run(accessor, this.editor);
+		});
+	}
+
+	private isInPeekEditor(accessor: ServicesAccessor): boolean | undefined {
+		const contextKeyService = accessor.get(IContextKeyService);
+		return PeekContext.inPeekEditor.getValue(contextKeyService);
 	}
 
 	public dispose(): void {

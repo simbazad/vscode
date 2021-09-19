@@ -3,12 +3,13 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { SplitView, Orientation, ISplitViewStyles, IView as ISplitViewView } from 'vs/base/browser/ui/splitview/splitview';
 import { $ } from 'vs/base/browser/dom';
-import { Event } from 'vs/base/common/event';
 import { IView, IViewSize } from 'vs/base/browser/ui/grid/grid';
-import { IDisposable, DisposableStore } from 'vs/base/common/lifecycle';
+import { IBoundarySashes } from 'vs/base/browser/ui/grid/gridview';
+import { ISplitViewStyles, IView as ISplitViewView, Orientation, SplitView } from 'vs/base/browser/ui/splitview/splitview';
 import { Color } from 'vs/base/common/color';
+import { Event } from 'vs/base/common/event';
+import { DisposableStore, IDisposable } from 'vs/base/common/lifecycle';
 
 export interface CenteredViewState {
 	leftMarginRatio: number;
@@ -72,6 +73,19 @@ export class CenteredViewLayout implements IDisposable {
 	get maximumHeight(): number { return this.view.maximumHeight; }
 	get onDidChange(): Event<IViewSize | undefined> { return this.view.onDidChange; }
 
+	private _boundarySashes: IBoundarySashes = {};
+	get boundarySashes(): IBoundarySashes { return this._boundarySashes; }
+	set boundarySashes(boundarySashes: IBoundarySashes) {
+		this._boundarySashes = boundarySashes;
+
+		if (!this.splitView) {
+			return;
+		}
+
+		this.splitView.orthogonalStartSash = boundarySashes.top;
+		this.splitView.orthogonalEndSash = boundarySashes.bottom;
+	}
+
 	layout(width: number, height: number): void {
 		this.width = width;
 		this.height = height;
@@ -119,6 +133,8 @@ export class CenteredViewLayout implements IDisposable {
 				orientation: Orientation.HORIZONTAL,
 				styles: this.style
 			});
+			this.splitView.orthogonalStartSash = this.boundarySashes.top;
+			this.splitView.orthogonalEndSash = this.boundarySashes.bottom;
 
 			this.splitViewDisposables.add(this.splitView.onDidSashChange(() => {
 				if (this.splitView) {
@@ -149,6 +165,7 @@ export class CenteredViewLayout implements IDisposable {
 			this.splitView = undefined;
 			this.emptyViews = undefined;
 			this.container.appendChild(this.view.element);
+			this.view.layout(this.width, this.height, 0, 0);
 		}
 	}
 

@@ -3,32 +3,57 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { Promises } from 'vs/base/common/async';
 import { IDisposable } from 'vs/base/common/lifecycle';
-import { IConfigurationService, ConfigurationTarget, ConfigurationTargetToString } from 'vs/platform/configuration/common/configuration';
-import { ITelemetryService, ITelemetryInfo, ITelemetryData } from 'vs/platform/telemetry/common/telemetry';
-import { ILogService } from 'vs/platform/log/common/log';
-import { ClassifiedEvent, StrictPropertyCheck, GDPRClassification } from 'vs/platform/telemetry/common/gdprTypings';
 import { safeStringify } from 'vs/base/common/objects';
 import { isObject } from 'vs/base/common/types';
+import { ConfigurationTarget, ConfigurationTargetToString, IConfigurationService } from 'vs/platform/configuration/common/configuration';
+import { IEnvironmentService } from 'vs/platform/environment/common/environment';
+import { IProductService } from 'vs/platform/product/common/productService';
+import { ClassifiedEvent, GDPRClassification, StrictPropertyCheck } from 'vs/platform/telemetry/common/gdprTypings';
+import { ICustomEndpointTelemetryService, ITelemetryData, ITelemetryEndpoint, ITelemetryInfo, ITelemetryService, TelemetryConfiguration, TelemetryLevel, TELEMETRY_OLD_SETTING_ID, TELEMETRY_SETTING_ID } from 'vs/platform/telemetry/common/telemetry';
 
 export const NullTelemetryService = new class implements ITelemetryService {
-	_serviceBrand: undefined;
+	declare readonly _serviceBrand: undefined;
+	readonly sendErrorTelemetry = false;
+
 	publicLog(eventName: string, data?: ITelemetryData) {
 		return Promise.resolve(undefined);
 	}
 	publicLog2<E extends ClassifiedEvent<T> = never, T extends GDPRClassification<T> = never>(eventName: string, data?: StrictPropertyCheck<T, E>) {
 		return this.publicLog(eventName, data as ITelemetryData);
 	}
+	publicLogError(eventName: string, data?: ITelemetryData) {
+		return Promise.resolve(undefined);
+	}
+	publicLogError2<E extends ClassifiedEvent<T> = never, T extends GDPRClassification<T> = never>(eventName: string, data?: StrictPropertyCheck<T, E>) {
+		return this.publicLogError(eventName, data as ITelemetryData);
+	}
+
+	setExperimentProperty() { }
 	setEnabled() { }
 	isOptedIn = true;
 	getTelemetryInfo(): Promise<ITelemetryInfo> {
 		return Promise.resolve({
 			instanceId: 'someValue.instanceId',
 			sessionId: 'someValue.sessionId',
-			machineId: 'someValue.machineId'
+			machineId: 'someValue.machineId',
+			firstSessionDate: 'someValue.firstSessionDate'
 		});
 	}
 };
+
+export class NullEndpointTelemetryService implements ICustomEndpointTelemetryService {
+	_serviceBrand: undefined;
+
+	async publicLog(_endpoint: ITelemetryEndpoint, _eventName: string, _data?: ITelemetryData): Promise<void> {
+		// noop
+	}
+
+	async publicLogError(_endpoint: ITelemetryEndpoint, _errorEventName: string, _data?: ITelemetryData): Promise<void> {
+		// noop
+	}
+}
 
 export interface ITelemetryAppender {
 	log(eventName: string, data: any): void;
@@ -38,32 +63,12 @@ export interface ITelemetryAppender {
 export function combinedAppender(...appenders: ITelemetryAppender[]): ITelemetryAppender {
 	return {
 		log: (e, d) => appenders.forEach(a => a.log(e, d)),
-		flush: () => Promise.all(appenders.map(a => a.flush()))
+		flush: () => Promises.settled(appenders.map(a => a.flush())),
 	};
 }
 
 export const NullAppender: ITelemetryAppender = { log: () => null, flush: () => Promise.resolve(null) };
 
-
-export class LogAppender implements ITelemetryAppender {
-
-	private commonPropertiesRegex = /^sessionID$|^version$|^timestamp$|^commitHash$|^common\./;
-	constructor(@ILogService private readonly _logService: ILogService) { }
-
-	flush(): Promise<any> {
-		return Promise.resolve(undefined);
-	}
-
-	log(eventName: string, data: any): void {
-		const strippedData: { [key: string]: any } = {};
-		Object.keys(data).forEach(key => {
-			if (!this.commonPropertiesRegex.test(key)) {
-				strippedData[key] = data[key];
-			}
-		});
-		this._logService.trace(`telemetry/${eventName}`, strippedData);
-	}
-}
 
 /* __GDPR__FRAGMENT__
 	"URIDescriptor" : {
@@ -97,6 +102,49 @@ export function configurationTelemetry(telemetryService: ITelemetryService, conf
 			});
 		}
 	});
+}
+
+/**
+ * Determines how telemetry is handled based on the current running configuration.
+ * To log telemetry locally, the client must not disable telemetry via the CLI
+ * If client is a built product and telemetry is enabled via the product.json, defer to user setting
+ * Note that when running from sources, we log telemetry locally but do not send it
+ *
+ * @param productService
+ * @param environmentService
+ * @returns NONE - telemetry is completely disabled, LOG - telemetry is logged locally but not sent, USER - verify with user setting
+ */
+export function getTelemetryLevel(productService: IProductService, environmentService: IEnvironmentService): TelemetryLevel {
+	if (environmentService.disableTelemetry || !productService.enableTelemetry) {
+		return TelemetryLevel.NONE;
+	}
+
+	if (!environmentService.isBuilt) {
+		return TelemetryLevel.LOG;
+	}
+
+	return TelemetryLevel.USER;
+}
+
+/**
+ * Determines how telemetry is handled based on the current running configuration.
+ * To log telemetry locally, the client must not disable telemetry via the CLI
+ * If client is a built product and telemetry is enabled via the product.json, defer to user setting
+ * Note that when running from sources, we log telemetry locally but do not send it
+ *
+ * @param configurationService
+ * @returns OFF, ERROR, ON
+ */
+export function getTelemetryConfiguration(configurationService: IConfigurationService): TelemetryConfiguration {
+	const newConfig = configurationService.getValue<TelemetryConfiguration>(TELEMETRY_SETTING_ID);
+	const oldConfig = configurationService.getValue(TELEMETRY_OLD_SETTING_ID);
+
+	// Check old config for disablement
+	if (oldConfig !== undefined && oldConfig === false) {
+		return TelemetryConfiguration.OFF;
+	}
+
+	return newConfig ?? TelemetryConfiguration.ON;
 }
 
 export interface Properties {
@@ -147,8 +195,8 @@ export function cleanRemoteAuthority(remoteAuthority?: string): string {
 	}
 
 	let ret = 'other';
-	// Whitelisted remote authorities
-	['ssh-remote', 'dev-container', 'attached-container', 'wsl'].forEach((res: string) => {
+	const allowedAuthorities = ['ssh-remote', 'dev-container', 'attached-container', 'wsl'];
+	allowedAuthorities.forEach((res: string) => {
 		if (remoteAuthority!.indexOf(`${res}+`) === 0) {
 			ret = res;
 		}

@@ -3,26 +3,26 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { ReferencesModel, FileReferences, OneReference } from '../referencesModel';
-import { ITextModelService } from 'vs/editor/common/services/resolverService';
-import { ITreeRenderer, ITreeNode, IAsyncDataSource } from 'vs/base/browser/ui/tree/tree';
-import { IconLabel } from 'vs/base/browser/ui/iconLabel/iconLabel';
-import { CountBadge } from 'vs/base/browser/ui/countBadge/countBadge';
-import { ILabelService } from 'vs/platform/label/common/label';
-import { IThemeService } from 'vs/platform/theme/common/themeService';
-import { attachBadgeStyler } from 'vs/platform/theme/common/styler';
 import * as dom from 'vs/base/browser/dom';
-import { localize } from 'vs/nls';
-import { getBaseLabel } from 'vs/base/common/labels';
-import { dirname, basename } from 'vs/base/common/resources';
-import { Disposable } from 'vs/base/common/lifecycle';
-import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
-import { IAccessibilityProvider } from 'vs/base/browser/ui/list/listWidget';
-import { IListVirtualDelegate, IKeyboardNavigationLabelProvider, IIdentityProvider } from 'vs/base/browser/ui/list/list';
 import { IKeyboardEvent } from 'vs/base/browser/keyboardEvent';
-import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
-import { FuzzyScore, createMatches, IMatch } from 'vs/base/common/filters';
+import { CountBadge } from 'vs/base/browser/ui/countBadge/countBadge';
 import { HighlightedLabel } from 'vs/base/browser/ui/highlightedlabel/highlightedLabel';
+import { IconLabel } from 'vs/base/browser/ui/iconLabel/iconLabel';
+import { IIdentityProvider, IKeyboardNavigationLabelProvider, IListVirtualDelegate } from 'vs/base/browser/ui/list/list';
+import { IListAccessibilityProvider } from 'vs/base/browser/ui/list/listWidget';
+import { IAsyncDataSource, ITreeNode, ITreeRenderer } from 'vs/base/browser/ui/tree/tree';
+import { createMatches, FuzzyScore, IMatch } from 'vs/base/common/filters';
+import { getBaseLabel } from 'vs/base/common/labels';
+import { Disposable } from 'vs/base/common/lifecycle';
+import { basename, dirname } from 'vs/base/common/resources';
+import { ITextModelService } from 'vs/editor/common/services/resolverService';
+import { localize } from 'vs/nls';
+import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
+import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
+import { ILabelService } from 'vs/platform/label/common/label';
+import { attachBadgeStyler } from 'vs/platform/theme/common/styler';
+import { IThemeService } from 'vs/platform/theme/common/themeService';
+import { FileReferences, OneReference, ReferencesModel } from '../referencesModel';
 
 //#region data source
 
@@ -36,7 +36,7 @@ export class DataSource implements IAsyncDataSource<ReferencesModel | FileRefere
 		if (element instanceof ReferencesModel) {
 			return true;
 		}
-		if (element instanceof FileReferences && !element.failure) {
+		if (element instanceof FileReferences) {
 			return true;
 		}
 		return false;
@@ -83,8 +83,7 @@ export class StringRepresentationProvider implements IKeyboardNavigationLabelPro
 
 	getKeyboardNavigationLabel(element: TreeElement): { toString(): string; } {
 		if (element instanceof OneReference) {
-			const { preview } = element.parent;
-			const parts = preview && preview.preview(element.range);
+			const parts = element.parent.getPreview(element)?.preview(element.range);
 			if (parts) {
 				return parts.value;
 			}
@@ -119,7 +118,7 @@ class FileReferencesTemplate extends Disposable {
 	) {
 		super();
 		const parent = document.createElement('div');
-		dom.addClass(parent, 'reference-file');
+		parent.classList.add('reference-file');
 		this.file = this._register(new IconLabel(parent, { supportHighlights: true }));
 
 		this.badge = new CountBadge(dom.append(parent, dom.$('.count')));
@@ -133,9 +132,7 @@ class FileReferencesTemplate extends Disposable {
 		this.file.setLabel(getBaseLabel(element.uri), this._uriLabel.getUriLabel(parent, { relative: true }), { title: this._uriLabel.getUriLabel(element.uri), matches });
 		const len = element.children.length;
 		this.badge.setCount(len);
-		if (element.failure) {
-			this.badge.setTitleFormat(localize('referencesFailre', "Failed to resolve file."));
-		} else if (len > 1) {
+		if (len > 1) {
 			this.badge.setTitleFormat(localize('referencesCount', "{0} references", len));
 		} else {
 			this.badge.setTitleFormat(localize('referenceCount', "{0} reference", len));
@@ -174,20 +171,19 @@ class OneReferenceTemplate {
 	}
 
 	set(element: OneReference, score?: FuzzyScore): void {
-		const filePreview = element.parent.preview;
-		const preview = filePreview && filePreview.preview(element.range);
-		if (!preview) {
-			// this means we FAILED to resolve the document...
+		const preview = element.parent.getPreview(element)?.preview(element.range);
+		if (!preview || !preview.value) {
+			// this means we FAILED to resolve the document or the value is the empty string
 			this.label.set(`${basename(element.uri)}:${element.range.startLineNumber + 1}:${element.range.startColumn + 1}`);
 		} else {
 			// render search match as highlight unless
 			// we have score, then render the score
 			const { value, highlight } = preview;
 			if (score && !FuzzyScore.isDefault(score)) {
-				dom.toggleClass(this.label.element, 'referenceMatch', false);
+				this.label.element.classList.toggle('referenceMatch', false);
 				this.label.set(value, createMatches(score));
 			} else {
-				dom.toggleClass(this.label.element, 'referenceMatch', true);
+				this.label.element.classList.toggle('referenceMatch', true);
 				this.label.set(value, [highlight]);
 			}
 		}
@@ -213,7 +209,11 @@ export class OneReferenceRenderer implements ITreeRenderer<OneReference, FuzzySc
 //#endregion
 
 
-export class AriaProvider implements IAccessibilityProvider<FileReferences | OneReference> {
+export class AccessibilityProvider implements IListAccessibilityProvider<FileReferences | OneReference> {
+
+	getWidgetAriaLabel(): string {
+		return localize('treeAriaLabel', "References");
+	}
 
 	getAriaLabel(element: FileReferences | OneReference): string | null {
 		return element.ariaMessage;

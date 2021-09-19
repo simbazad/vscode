@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { IDisposable, toDisposable } from 'vs/base/common/lifecycle';
-import * as vscode from 'vscode';
+import type * as vscode from 'vscode';
 import { ExtHostSearchShape, MainThreadSearchShape, MainContext } from '../common/extHost.protocol';
 import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
 import { FileSearchManager } from 'vs/workbench/services/search/common/fileSearchManager';
@@ -105,11 +105,13 @@ export class ExtHostSearch implements ExtHostSearchShape {
 		return engine.search(progress => this._proxy.$handleTextMatch(handle, session, progress), token);
 	}
 
+	$enableExtensionHostSearch(): void { }
+
 	protected createTextSearchManager(query: ITextQuery, provider: vscode.TextSearchProvider): TextSearchManager {
 		return new TextSearchManager(query, provider, {
 			readdir: resource => Promise.resolve([]), // TODO@rob implement
 			toCanonicalName: encoding => encoding
-		});
+		}, 'textSearchProvider');
 	}
 }
 

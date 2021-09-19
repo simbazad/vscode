@@ -3,23 +3,27 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { distinct } from 'vs/base/common/arrays';
 import { Event } from 'vs/base/common/event';
+import { IDisposable, IReference } from 'vs/base/common/lifecycle';
 import { URI } from 'vs/base/common/uri';
+import * as nls from 'vs/nls';
 import { RawContextKey } from 'vs/platform/contextkey/common/contextkey';
-import { ITextEditorOptions } from 'vs/platform/editor/common/editor';
 import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
-import { EditorInput, IEditor, ISaveOptions, IRevertOptions } from 'vs/workbench/common/editor';
-import { IEditorGroup } from 'vs/workbench/services/editor/common/editorGroupsService';
-import { IWorkingCopy } from 'vs/workbench/services/workingCopy/common/workingCopyService';
+import { IRevertOptions, ISaveOptions } from 'vs/workbench/common/editor';
+import { globMatchesResource, priorityToRank, RegisteredEditorPriority } from 'vs/workbench/services/editor/common/editorResolverService';
 
 export const ICustomEditorService = createDecorator<ICustomEditorService>('customEditorService');
 
-export const CONTEXT_HAS_CUSTOM_EDITORS = new RawContextKey<boolean>('hasCustomEditors', false);
+export const CONTEXT_ACTIVE_CUSTOM_EDITOR_ID = new RawContextKey<string>('activeCustomEditorId', '', {
+	type: 'string',
+	description: nls.localize('context.customEditor', "The viewType of the currently active custom editor."),
+});
+
 export const CONTEXT_FOCUSED_CUSTOM_EDITOR_IS_EDITABLE = new RawContextKey<boolean>('focusedCustomEditorIsEditable', false);
 
-export interface ICustomEditor {
-	readonly resource: URI;
-	readonly viewType: string;
+export interface CustomEditorCapabilities {
+	readonly supportsMultipleEditorsPerDocument?: boolean;
 }
 
 export interface ICustomEditorService {
@@ -27,54 +31,45 @@ export interface ICustomEditorService {
 
 	readonly models: ICustomEditorModelManager;
 
-	readonly activeCustomEditor: ICustomEditor | undefined;
+	getCustomEditor(viewType: string): CustomEditorInfo | undefined;
+	getAllCustomEditors(resource: URI): CustomEditorInfoCollection;
+	getContributedCustomEditors(resource: URI): CustomEditorInfoCollection;
+	getUserConfiguredCustomEditors(resource: URI): CustomEditorInfoCollection;
 
-	getContributedCustomEditors(resource: URI): readonly CustomEditorInfo[];
-	getUserConfiguredCustomEditors(resource: URI): readonly CustomEditorInfo[];
-
-	createInput(resource: URI, viewType: string, group: IEditorGroup | undefined, options?: { readonly customClasses: string }): EditorInput;
-
-	openWith(resource: URI, customEditorViewType: string, options?: ITextEditorOptions, group?: IEditorGroup): Promise<IEditor | undefined>;
-	promptOpenWith(resource: URI, options?: ITextEditorOptions, group?: IEditorGroup): Promise<IEditor | undefined>;
+	registerCustomEditorCapabilities(viewType: string, options: CustomEditorCapabilities): IDisposable;
+	getCustomEditorCapabilities(viewType: string): CustomEditorCapabilities | undefined
 }
-
-export type CustomEditorEdit = { source?: any, data: any };
 
 export interface ICustomEditorModelManager {
-	get(resource: URI, viewType: string): ICustomEditorModel | undefined;
+	getAllModels(resource: URI): Promise<ICustomEditorModel[]>
 
-	loadOrCreate(resource: URI, viewType: string): Promise<ICustomEditorModel>;
+	get(resource: URI, viewType: string): Promise<ICustomEditorModel | undefined>;
 
-	disposeModel(model: ICustomEditorModel): void;
+	tryRetain(resource: URI, viewType: string): Promise<IReference<ICustomEditorModel>> | undefined;
+
+	add(resource: URI, viewType: string, model: Promise<ICustomEditorModel>): Promise<IReference<ICustomEditorModel>>;
+
+	disposeAllModelsForView(viewType: string): void;
 }
 
-export interface CustomEditorSaveEvent {
+export interface ICustomEditorModel extends IDisposable {
+	readonly viewType: string;
 	readonly resource: URI;
-	readonly waitUntil: (until: Promise<any>) => void;
-}
+	readonly backupId: string | undefined;
 
-export interface CustomEditorSaveAsEvent {
-	readonly resource: URI;
-	readonly targetResource: URI;
-	readonly waitUntil: (until: Promise<any>) => void;
-}
+	isReadonly(): boolean;
+	readonly onDidChangeReadonly: Event<void>;
 
-export interface ICustomEditorModel extends IWorkingCopy {
-	readonly onUndo: Event<readonly CustomEditorEdit[]>;
-	readonly onApplyEdit: Event<readonly CustomEditorEdit[]>;
-	readonly onWillSave: Event<CustomEditorSaveEvent>;
-	readonly onWillSaveAs: Event<CustomEditorSaveAsEvent>;
+	isOrphaned(): boolean;
+	readonly onDidChangeOrphaned: Event<void>;
 
-	readonly currentEdits: readonly CustomEditorEdit[];
+	isDirty(): boolean;
+	readonly onDidChangeDirty: Event<void>;
 
-	undo(): void;
-	redo(): void;
-	revert(options?: IRevertOptions): Promise<boolean>;
+	revert(options?: IRevertOptions): Promise<void>;
 
-	save(options?: ISaveOptions): Promise<boolean>;
-	saveAs(resource: URI, targetResource: URI, currentOptions?: ISaveOptions): Promise<boolean>;
-
-	makeEdit(edit: CustomEditorEdit): void;
+	saveCustomEditor(options?: ISaveOptions): Promise<URI | undefined>;
+	saveCustomEditorAs(resource: URI, targetResource: URI, currentOptions?: ISaveOptions): Promise<boolean>;
 }
 
 export const enum CustomEditorPriority {
@@ -87,9 +82,80 @@ export interface CustomEditorSelector {
 	readonly filenamePattern?: string;
 }
 
-export interface CustomEditorInfo {
+export interface CustomEditorDescriptor {
 	readonly id: string;
 	readonly displayName: string;
-	readonly priority: CustomEditorPriority;
+	readonly providerDisplayName: string;
+	readonly priority: RegisteredEditorPriority;
 	readonly selector: readonly CustomEditorSelector[];
+}
+
+export class CustomEditorInfo implements CustomEditorDescriptor {
+
+	public readonly id: string;
+	public readonly displayName: string;
+	public readonly providerDisplayName: string;
+	public readonly priority: RegisteredEditorPriority;
+	public readonly selector: readonly CustomEditorSelector[];
+
+	constructor(descriptor: CustomEditorDescriptor) {
+		this.id = descriptor.id;
+		this.displayName = descriptor.displayName;
+		this.providerDisplayName = descriptor.providerDisplayName;
+		this.priority = descriptor.priority;
+		this.selector = descriptor.selector;
+	}
+
+	matches(resource: URI): boolean {
+		return this.selector.some(selector => selector.filenamePattern && globMatchesResource(selector.filenamePattern, resource));
+	}
+}
+
+export class CustomEditorInfoCollection {
+
+	public readonly allEditors: readonly CustomEditorInfo[];
+
+	constructor(
+		editors: readonly CustomEditorInfo[],
+	) {
+		this.allEditors = distinct(editors, editor => editor.id);
+	}
+
+	public get length(): number { return this.allEditors.length; }
+
+	/**
+	 * Find the single default editor to use (if any) by looking at the editor's priority and the
+	 * other contributed editors.
+	 */
+	public get defaultEditor(): CustomEditorInfo | undefined {
+		return this.allEditors.find(editor => {
+			switch (editor.priority) {
+				case RegisteredEditorPriority.default:
+				case RegisteredEditorPriority.builtin:
+					// A default editor must have higher priority than all other contributed editors.
+					return this.allEditors.every(otherEditor =>
+						otherEditor === editor || isLowerPriority(otherEditor, editor));
+
+				default:
+					return false;
+			}
+		});
+	}
+
+	/**
+	 * Find the best available editor to use.
+	 *
+	 * Unlike the `defaultEditor`, a bestAvailableEditor can exist even if there are other editors with
+	 * the same priority.
+	 */
+	public get bestAvailableEditor(): CustomEditorInfo | undefined {
+		const editors = Array.from(this.allEditors).sort((a, b) => {
+			return priorityToRank(a.priority) - priorityToRank(b.priority);
+		});
+		return editors[0];
+	}
+}
+
+function isLowerPriority(otherEditor: CustomEditorInfo, editor: CustomEditorInfo): unknown {
+	return priorityToRank(otherEditor.priority) < priorityToRank(editor.priority);
 }

@@ -3,29 +3,30 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { ReferencesModel, OneReference } from 'vs/editor/contrib/gotoSymbol/referencesModel';
-import { RawContextKey, IContextKeyService, IContextKey, ContextKeyExpr } from 'vs/platform/contextkey/common/contextkey';
-import { createDecorator, ServicesAccessor } from 'vs/platform/instantiation/common/instantiation';
-import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
-import { KeybindingWeight, KeybindingsRegistry } from 'vs/platform/keybinding/common/keybindingsRegistry';
+import { Emitter, Event } from 'vs/base/common/event';
 import { KeyCode } from 'vs/base/common/keyCodes';
-import { registerEditorCommand, EditorCommand } from 'vs/editor/browser/editorExtensions';
+import { combinedDisposable, DisposableStore, dispose, IDisposable } from 'vs/base/common/lifecycle';
+import { isEqual } from 'vs/base/common/resources';
 import { ICodeEditor } from 'vs/editor/browser/editorBrowser';
+import { EditorCommand, registerEditorCommand } from 'vs/editor/browser/editorExtensions';
 import { ICodeEditorService } from 'vs/editor/browser/services/codeEditorService';
 import { Range } from 'vs/editor/common/core/range';
-import { dispose, IDisposable, combinedDisposable, DisposableStore } from 'vs/base/common/lifecycle';
-import { Emitter, Event } from 'vs/base/common/event';
+import { OneReference, ReferencesModel } from 'vs/editor/contrib/gotoSymbol/referencesModel';
 import { localize } from 'vs/nls';
+import { IContextKey, IContextKeyService, RawContextKey } from 'vs/platform/contextkey/common/contextkey';
+import { TextEditorSelectionRevealType } from 'vs/platform/editor/common/editor';
+import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
+import { createDecorator, ServicesAccessor } from 'vs/platform/instantiation/common/instantiation';
 import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
+import { KeybindingsRegistry, KeybindingWeight } from 'vs/platform/keybinding/common/keybindingsRegistry';
 import { INotificationService } from 'vs/platform/notification/common/notification';
-import { isEqual } from 'vs/base/common/resources';
 
-export const ctxHasSymbols = new RawContextKey('hasSymbols', false);
+export const ctxHasSymbols = new RawContextKey('hasSymbols', false, localize('hasSymbols', "Whether there are symbol locations that can be navigated via keyboard-only."));
 
 export const ISymbolNavigationService = createDecorator<ISymbolNavigationService>('ISymbolNavigationService');
 
 export interface ISymbolNavigationService {
-	_serviceBrand: undefined;
+	readonly _serviceBrand: undefined;
 	reset(): void;
 	put(anchor: OneReference): void;
 	revealNext(source: ICodeEditor): Promise<any>;
@@ -33,7 +34,7 @@ export interface ISymbolNavigationService {
 
 class SymbolNavigationService implements ISymbolNavigationService {
 
-	_serviceBrand: undefined;
+	declare readonly _serviceBrand: undefined;
 
 	private readonly _ctxHasSymbols: IContextKey<boolean>;
 
@@ -54,8 +55,8 @@ class SymbolNavigationService implements ISymbolNavigationService {
 
 	reset(): void {
 		this._ctxHasSymbols.reset();
-		dispose(this._currentState);
-		dispose(this._currentMessage);
+		this._currentState?.dispose();
+		this._currentMessage?.dispose();
 		this._currentModel = undefined;
 		this._currentIdx = -1;
 	}
@@ -127,7 +128,7 @@ class SymbolNavigationService implements ISymbolNavigationService {
 			resource: reference.uri,
 			options: {
 				selection: Range.collapseToStart(reference.range),
-				revealInCenterIfOutsideViewport: true
+				selectionRevealType: TextEditorSelectionRevealType.NearTopIfOutsideViewport
 			}
 		}, source).finally(() => {
 			this._ignoreEditorChange = false;
@@ -137,7 +138,7 @@ class SymbolNavigationService implements ISymbolNavigationService {
 
 	private _showMessage(): void {
 
-		dispose(this._currentMessage);
+		this._currentMessage?.dispose();
 
 		const kb = this._keybindingService.lookupKeybinding('editor.gotoNextSymbolFromResult');
 		const message = kb
@@ -155,10 +156,7 @@ registerEditorCommand(new class extends EditorCommand {
 	constructor() {
 		super({
 			id: 'editor.gotoNextSymbolFromResult',
-			precondition: ContextKeyExpr.and(
-				ctxHasSymbols,
-				ContextKeyExpr.equals('config.editor.gotoLocation.multiple', 'goto')
-			),
+			precondition: ctxHasSymbols,
 			kbOpts: {
 				weight: KeybindingWeight.EditorContrib,
 				primary: KeyCode.F12
@@ -200,7 +198,7 @@ class EditorState {
 	dispose(): void {
 		this._disposables.dispose();
 		this._onDidChange.dispose();
-		this._listener.forEach(dispose);
+		dispose(this._listener.values());
 	}
 
 	private _onDidAddEditor(editor: ICodeEditor): void {
@@ -211,7 +209,7 @@ class EditorState {
 	}
 
 	private _onDidRemoveEditor(editor: ICodeEditor): void {
-		dispose(this._listener.get(editor));
+		this._listener.get(editor)?.dispose();
 		this._listener.delete(editor);
 	}
 }

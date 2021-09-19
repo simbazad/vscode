@@ -3,10 +3,10 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
-import { IWorkspaceIdentifier } from 'vs/platform/workspaces/common/workspaces';
 import { URI } from 'vs/base/common/uri';
 import { IEmptyWindowBackupInfo } from 'vs/platform/backup/node/backup';
+import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
+import { isWorkspaceIdentifier, IWorkspaceIdentifier } from 'vs/platform/workspaces/common/workspaces';
 
 export const IBackupMainService = createDecorator<IBackupMainService>('backupMainService');
 
@@ -15,8 +15,14 @@ export interface IWorkspaceBackupInfo {
 	remoteAuthority?: string;
 }
 
+export function isWorkspaceBackupInfo(obj: unknown): obj is IWorkspaceBackupInfo {
+	const candidate = obj as IWorkspaceBackupInfo;
+
+	return candidate && isWorkspaceIdentifier(candidate.workspace);
+}
+
 export interface IBackupMainService {
-	_serviceBrand: undefined;
+	readonly _serviceBrand: undefined;
 
 	isHotExitEnabled(): boolean;
 
@@ -31,4 +37,12 @@ export interface IBackupMainService {
 	unregisterWorkspaceBackupSync(workspace: IWorkspaceIdentifier): void;
 	unregisterFolderBackupSync(folderUri: URI): void;
 	unregisterEmptyWindowBackupSync(backupFolder: string): void;
+
+	/**
+	 * All folders or workspaces that are known to have
+	 * backups stored. This call is long running because
+	 * it checks for each backup location if any backups
+	 * are stored.
+	 */
+	getDirtyWorkspaces(): Promise<Array<IWorkspaceIdentifier | URI>>;
 }

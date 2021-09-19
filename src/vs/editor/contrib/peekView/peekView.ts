@@ -3,38 +3,38 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import 'vs/css!./media/peekViewWidget';
 import * as dom from 'vs/base/browser/dom';
 import { IMouseEvent } from 'vs/base/browser/mouseEvent';
-import { ActionBar, IActionBarOptions } from 'vs/base/browser/ui/actionbar/actionbar';
+import { ActionBar, ActionsOrientation, IActionBarOptions } from 'vs/base/browser/ui/actionbar/actionbar';
 import { Action } from 'vs/base/common/actions';
+import { Codicon } from 'vs/base/common/codicons';
 import { Color } from 'vs/base/common/color';
 import { Emitter } from 'vs/base/common/event';
+import { IDisposable } from 'vs/base/common/lifecycle';
 import * as objects from 'vs/base/common/objects';
-import * as strings from 'vs/base/common/strings';
+import 'vs/css!./media/peekViewWidget';
 import { ICodeEditor } from 'vs/editor/browser/editorBrowser';
+import { registerEditorContribution } from 'vs/editor/browser/editorExtensions';
 import { ICodeEditorService } from 'vs/editor/browser/services/codeEditorService';
 import { EmbeddedCodeEditorWidget } from 'vs/editor/browser/widget/embeddedCodeEditorWidget';
+import { EditorOption } from 'vs/editor/common/config/editorOptions';
+import { IEditorContribution } from 'vs/editor/common/editorCommon';
 import { IOptions, IStyles, ZoneWidget } from 'vs/editor/contrib/zoneWidget/zoneWidget';
 import * as nls from 'vs/nls';
-import { ContextKeyExpr, RawContextKey, IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
-import { ServicesAccessor, createDecorator } from 'vs/platform/instantiation/common/instantiation';
-import { IDisposable } from 'vs/base/common/lifecycle';
+import { createActionViewItem } from 'vs/platform/actions/browser/menuEntryActionViewItem';
+import { IContextKeyService, RawContextKey } from 'vs/platform/contextkey/common/contextkey';
 import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
-import { EditorOption } from 'vs/editor/common/config/editorOptions';
-import { registerEditorContribution } from 'vs/editor/browser/editorExtensions';
-import { IEditorContribution } from 'vs/editor/common/editorCommon';
-import { registerColor, contrastBorder, activeContrastBorder } from 'vs/platform/theme/common/colorRegistry';
-
+import { createDecorator, IInstantiationService, ServicesAccessor } from 'vs/platform/instantiation/common/instantiation';
+import { activeContrastBorder, contrastBorder, editorInfoForeground, registerColor, transparent } from 'vs/platform/theme/common/colorRegistry';
 
 export const IPeekViewService = createDecorator<IPeekViewService>('IPeekViewService');
 export interface IPeekViewService {
-	_serviceBrand: undefined;
+	readonly _serviceBrand: undefined;
 	addExclusiveWidget(editor: ICodeEditor, widget: PeekViewWidget): void;
 }
 
 registerSingleton(IPeekViewService, class implements IPeekViewService {
-	_serviceBrand: undefined;
+	declare readonly _serviceBrand: undefined;
 
 	private readonly _widgets = new Map<ICodeEditor, { widget: PeekViewWidget, listener: IDisposable; }>();
 
@@ -56,8 +56,8 @@ registerSingleton(IPeekViewService, class implements IPeekViewService {
 });
 
 export namespace PeekContext {
-	export const inPeekEditor = new RawContextKey<boolean>('inReferenceSearchEditor', true);
-	export const notInPeekEditor: ContextKeyExpr = inPeekEditor.toNegated();
+	export const inPeekEditor = new RawContextKey<boolean>('inReferenceSearchEditor', true, nls.localize('inReferenceSearchEditor', "Whether the current code editor is embedded inside peek"));
+	export const notInPeekEditor = inPeekEditor.toNegated();
 }
 
 class PeekContextController implements IEditorContribution {
@@ -92,7 +92,9 @@ export interface IPeekViewStyles extends IStyles {
 	secondaryHeadingColor?: Color;
 }
 
-export type IPeekViewOptions = IOptions & IPeekViewStyles;
+export type IPeekViewOptions = IOptions & IPeekViewStyles & {
+	supportOnTitleClick?: boolean;
+};
 
 const defaultOptions: IPeekViewOptions = {
 	headerBackgroundColor: Color.white,
@@ -102,10 +104,11 @@ const defaultOptions: IPeekViewOptions = {
 
 export abstract class PeekViewWidget extends ZoneWidget {
 
-	_serviceBrand: undefined;
+	declare readonly _serviceBrand: undefined;
 
 	private readonly _onDidClose = new Emitter<PeekViewWidget>();
 	readonly onDidClose = this._onDidClose.event;
+	private disposed?: true;
 
 	protected _headElement?: HTMLDivElement;
 	protected _primaryHeading?: HTMLElement;
@@ -114,17 +117,24 @@ export abstract class PeekViewWidget extends ZoneWidget {
 	protected _actionbarWidget?: ActionBar;
 	protected _bodyElement?: HTMLDivElement;
 
-	constructor(editor: ICodeEditor, options: IPeekViewOptions = {}) {
+	constructor(
+		editor: ICodeEditor,
+		options: IPeekViewOptions,
+		@IInstantiationService protected readonly instantiationService: IInstantiationService
+	) {
 		super(editor, options);
 		objects.mixin(this.options, defaultOptions, false);
 	}
 
-	dispose(): void {
-		super.dispose();
-		this._onDidClose.fire(this);
+	override dispose(): void {
+		if (!this.disposed) {
+			this.disposed = true; // prevent consumers who dispose on onDidClose from looping
+			super.dispose();
+			this._onDidClose.fire(this);
+		}
 	}
 
-	style(styles: IPeekViewStyles): void {
+	override style(styles: IPeekViewStyles): void {
 		let options = <IPeekViewOptions>this.options;
 		if (styles.headerBackgroundColor) {
 			options.headerBackgroundColor = styles.headerBackgroundColor;
@@ -138,7 +148,7 @@ export abstract class PeekViewWidget extends ZoneWidget {
 		super.style(styles);
 	}
 
-	protected _applyStyles(): void {
+	protected override _applyStyles(): void {
 		super._applyStyles();
 		let options = <IPeekViewOptions>this.options;
 		if (this._headElement && options.headerBackgroundColor) {
@@ -168,10 +178,13 @@ export abstract class PeekViewWidget extends ZoneWidget {
 		container.appendChild(this._bodyElement);
 	}
 
-	protected _fillHead(container: HTMLElement): void {
+	protected _fillHead(container: HTMLElement, noCloseAction?: boolean): void {
 		const titleElement = dom.$('.peekview-title');
+		if ((this.options as IPeekViewOptions).supportOnTitleClick) {
+			titleElement.classList.add('clickable');
+			dom.addStandardDisposableListener(titleElement, 'click', event => this._onTitleClick(event));
+		}
 		dom.append(this._headElement!, titleElement);
-		dom.addStandardDisposableListener(titleElement, 'click', event => this._onTitleClick(event));
 
 		this._fillTitleIcon(titleElement);
 		this._primaryHeading = dom.$('span.filename');
@@ -186,29 +199,34 @@ export abstract class PeekViewWidget extends ZoneWidget {
 		this._actionbarWidget = new ActionBar(actionsContainer, actionBarOptions);
 		this._disposables.add(this._actionbarWidget);
 
-		this._actionbarWidget.push(new Action('peekview.close', nls.localize('label.close', "Close"), 'codicon-close', true, () => {
-			this.dispose();
-			return Promise.resolve();
-		}), { label: false, icon: true });
+		if (!noCloseAction) {
+			this._actionbarWidget.push(new Action('peekview.close', nls.localize('label.close', "Close"), Codicon.close.classNames, true, () => {
+				this.dispose();
+				return Promise.resolve();
+			}), { label: false, icon: true });
+		}
 	}
 
 	protected _fillTitleIcon(container: HTMLElement): void {
 	}
 
 	protected _getActionBarOptions(): IActionBarOptions {
-		return {};
+		return {
+			actionViewItemProvider: createActionViewItem.bind(undefined, this.instantiationService),
+			orientation: ActionsOrientation.HORIZONTAL
+		};
 	}
 
 	protected _onTitleClick(event: IMouseEvent): void {
-		// implement me
+		// implement me if supportOnTitleClick option is set
 	}
 
 	setTitle(primaryHeading: string, secondaryHeading?: string): void {
 		if (this._primaryHeading && this._secondaryHeading) {
-			this._primaryHeading.innerHTML = strings.escape(primaryHeading);
-			this._primaryHeading.setAttribute('aria-label', primaryHeading);
+			this._primaryHeading.innerText = primaryHeading;
+			this._primaryHeading.setAttribute('title', primaryHeading);
 			if (secondaryHeading) {
-				this._secondaryHeading.innerHTML = strings.escape(secondaryHeading);
+				this._secondaryHeading.innerText = secondaryHeading;
 			} else {
 				dom.clearNode(this._secondaryHeading);
 			}
@@ -218,7 +236,7 @@ export abstract class PeekViewWidget extends ZoneWidget {
 	setMetaTitle(value: string): void {
 		if (this._metaHeading) {
 			if (value) {
-				this._metaHeading.innerHTML = strings.escape(value);
+				this._metaHeading.innerText = value;
 				dom.show(this._metaHeading);
 			} else {
 				dom.hide(this._metaHeading);
@@ -228,7 +246,7 @@ export abstract class PeekViewWidget extends ZoneWidget {
 
 	protected abstract _fillBody(container: HTMLElement): void;
 
-	protected _doLayout(heightInPixel: number, widthInPixel: number): void {
+	protected override _doLayout(heightInPixel: number, widthInPixel: number): void {
 
 		if (!this._isShowing && heightInPixel < 0) {
 			// Looks like the view zone got folded away!
@@ -258,10 +276,10 @@ export abstract class PeekViewWidget extends ZoneWidget {
 }
 
 
-export const peekViewTitleBackground = registerColor('peekViewTitle.background', { dark: '#1E1E1E', light: '#FFFFFF', hc: '#0C141F' }, nls.localize('peekViewTitleBackground', 'Background color of the peek view title area.'));
-export const peekViewTitleForeground = registerColor('peekViewTitleLabel.foreground', { dark: '#FFFFFF', light: '#333333', hc: '#FFFFFF' }, nls.localize('peekViewTitleForeground', 'Color of the peek view title.'));
-export const peekViewTitleInfoForeground = registerColor('peekViewTitleDescription.foreground', { dark: '#ccccccb3', light: '#6c6c6cb3', hc: '#FFFFFF99' }, nls.localize('peekViewTitleInfoForeground', 'Color of the peek view title info.'));
-export const peekViewBorder = registerColor('peekView.border', { dark: '#007acc', light: '#007acc', hc: contrastBorder }, nls.localize('peekViewBorder', 'Color of the peek view borders and arrow.'));
+export const peekViewTitleBackground = registerColor('peekViewTitle.background', { dark: transparent(editorInfoForeground, .1), light: transparent(editorInfoForeground, .1), hc: null }, nls.localize('peekViewTitleBackground', 'Background color of the peek view title area.'));
+export const peekViewTitleForeground = registerColor('peekViewTitleLabel.foreground', { dark: Color.white, light: Color.black, hc: Color.white }, nls.localize('peekViewTitleForeground', 'Color of the peek view title.'));
+export const peekViewTitleInfoForeground = registerColor('peekViewTitleDescription.foreground', { dark: '#ccccccb3', light: '#616161e6', hc: '#FFFFFF99' }, nls.localize('peekViewTitleInfoForeground', 'Color of the peek view title info.'));
+export const peekViewBorder = registerColor('peekView.border', { dark: editorInfoForeground, light: editorInfoForeground, hc: contrastBorder }, nls.localize('peekViewBorder', 'Color of the peek view borders and arrow.'));
 
 export const peekViewResultsBackground = registerColor('peekViewResult.background', { dark: '#252526', light: '#F3F3F3', hc: Color.black }, nls.localize('peekViewResultsBackground', 'Background color of the peek view result list.'));
 export const peekViewResultsMatchForeground = registerColor('peekViewResult.lineForeground', { dark: '#bbbbbb', light: '#646465', hc: Color.white }, nls.localize('peekViewResultsMatchForeground', 'Foreground color for line nodes in the peek view result list.'));

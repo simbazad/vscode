@@ -3,26 +3,26 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import 'vs/css!./bracketMatching';
-import * as nls from 'vs/nls';
 import { RunOnceScheduler } from 'vs/base/common/async';
 import { KeyCode, KeyMod } from 'vs/base/common/keyCodes';
 import { Disposable } from 'vs/base/common/lifecycle';
+import 'vs/css!./bracketMatching';
 import { ICodeEditor } from 'vs/editor/browser/editorBrowser';
-import { EditorAction, ServicesAccessor, registerEditorAction, registerEditorContribution } from 'vs/editor/browser/editorExtensions';
+import { EditorAction, registerEditorAction, registerEditorContribution, ServicesAccessor } from 'vs/editor/browser/editorExtensions';
+import { EditorOption } from 'vs/editor/common/config/editorOptions';
 import { Position } from 'vs/editor/common/core/position';
 import { Range } from 'vs/editor/common/core/range';
 import { Selection } from 'vs/editor/common/core/selection';
-import * as editorCommon from 'vs/editor/common/editorCommon';
+import { IEditorContribution } from 'vs/editor/common/editorCommon';
 import { EditorContextKeys } from 'vs/editor/common/editorContextKeys';
 import { IModelDeltaDecoration, OverviewRulerLane, TrackedRangeStickiness } from 'vs/editor/common/model';
 import { ModelDecorationOptions } from 'vs/editor/common/model/textModel';
 import { editorBracketMatchBackground, editorBracketMatchBorder } from 'vs/editor/common/view/editorColorRegistry';
+import * as nls from 'vs/nls';
+import { MenuId, MenuRegistry } from 'vs/platform/actions/common/actions';
 import { KeybindingWeight } from 'vs/platform/keybinding/common/keybindingsRegistry';
 import { registerColor } from 'vs/platform/theme/common/colorRegistry';
 import { registerThemingParticipant, themeColorFromId } from 'vs/platform/theme/common/themeService';
-import { MenuRegistry, MenuId } from 'vs/platform/actions/common/actions';
-import { EditorOption } from 'vs/editor/common/config/editorOptions';
 
 const overviewRulerBracketMatchForeground = registerColor('editorOverviewRuler.bracketMatchForeground', { dark: '#A0A0A0', light: '#A0A0A0', hc: '#A0A0A0' }, nls.localize('overviewRulerBracketMatchForeground', 'Overview ruler marker color for matching brackets.'));
 
@@ -103,7 +103,7 @@ class BracketsData {
 	}
 }
 
-export class BracketMatchingController extends Disposable implements editorCommon.IEditorContribution {
+export class BracketMatchingController extends Disposable implements IEditorContribution {
 	public static readonly ID = 'editor.contrib.bracketMatchingController';
 
 	public static get(editor: ICodeEditor): BracketMatchingController {
@@ -116,7 +116,7 @@ export class BracketMatchingController extends Disposable implements editorCommo
 	private _lastVersionId: number;
 	private _decorations: string[];
 	private readonly _updateBracketsSoon: RunOnceScheduler;
-	private _matchBrackets: boolean;
+	private _matchBrackets: 'never' | 'near' | 'always';
 
 	constructor(
 		editor: ICodeEditor
@@ -132,7 +132,7 @@ export class BracketMatchingController extends Disposable implements editorCommo
 		this._updateBracketsSoon.schedule();
 		this._register(editor.onDidChangeCursorPosition((e) => {
 
-			if (!this._matchBrackets) {
+			if (this._matchBrackets === 'never') {
 				// Early exit if nothing needs to be done!
 				// Leave some form of early exit check here if you wish to continue being a cursor position change listener ;)
 				return;
@@ -153,12 +153,13 @@ export class BracketMatchingController extends Disposable implements editorCommo
 			this._updateBracketsSoon.schedule();
 		}));
 		this._register(editor.onDidChangeConfiguration((e) => {
-			this._matchBrackets = this._editor.getOption(EditorOption.matchBrackets);
-			if (!this._matchBrackets && this._decorations.length > 0) {
-				// Remove existing decorations if bracket matching is off
+			if (e.hasChanged(EditorOption.matchBrackets)) {
+				this._matchBrackets = this._editor.getOption(EditorOption.matchBrackets);
 				this._decorations = this._editor.deltaDecorations(this._decorations, []);
+				this._lastBracketsData = [];
+				this._lastVersionId = 0;
+				this._updateBracketsSoon.schedule();
 			}
-			this._updateBracketsSoon.schedule();
 		}));
 	}
 
@@ -234,6 +235,13 @@ export class BracketMatchingController extends Disposable implements editorCommo
 				const [open, close] = brackets;
 				selectFrom = selectBrackets ? open.getStartPosition() : open.getEndPosition();
 				selectTo = selectBrackets ? close.getEndPosition() : close.getStartPosition();
+
+				if (close.containsPosition(position)) {
+					// select backwards if the cursor was on the closing bracket
+					const tmp = selectFrom;
+					selectFrom = selectTo;
+					selectTo = tmp;
+				}
 			}
 
 			if (selectFrom && selectTo) {
@@ -248,6 +256,7 @@ export class BracketMatchingController extends Disposable implements editorCommo
 	}
 
 	private static readonly _DECORATION_OPTIONS_WITH_OVERVIEW_RULER = ModelDecorationOptions.register({
+		description: 'bracket-match-overview',
 		stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
 		className: 'bracket-match',
 		overviewRuler: {
@@ -257,12 +266,13 @@ export class BracketMatchingController extends Disposable implements editorCommo
 	});
 
 	private static readonly _DECORATION_OPTIONS_WITHOUT_OVERVIEW_RULER = ModelDecorationOptions.register({
+		description: 'bracket-match-no-overview',
 		stickiness: TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
 		className: 'bracket-match'
 	});
 
 	private _updateBrackets(): void {
-		if (!this._matchBrackets) {
+		if (this._matchBrackets === 'never') {
 			return;
 		}
 		this._recomputeBrackets();
@@ -332,8 +342,8 @@ export class BracketMatchingController extends Disposable implements editorCommo
 			} else {
 				let brackets = model.matchBracket(position);
 				let options = BracketMatchingController._DECORATION_OPTIONS_WITH_OVERVIEW_RULER;
-				if (!brackets) {
-					brackets = model.findEnclosingBrackets(position);
+				if (!brackets && this._matchBrackets === 'always') {
+					brackets = model.findEnclosingBrackets(position, 20 /* give at most 20ms to compute */);
 					options = BracketMatchingController._DECORATION_OPTIONS_WITHOUT_OVERVIEW_RULER;
 				}
 				newData[newDataLen++] = new BracketsData(position, brackets, options);

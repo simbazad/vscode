@@ -3,7 +3,6 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import 'vs/css!./colorPicker';
 import { onDidChangeZoomLevel } from 'vs/base/browser/browser';
 import * as dom from 'vs/base/browser/dom';
 import { GlobalMouseMoveMonitor, IStandardMouseMoveEventData, standardMouseMoveMerger } from 'vs/base/browser/globalMouseMoveMonitor';
@@ -11,6 +10,7 @@ import { Widget } from 'vs/base/browser/ui/widget';
 import { Color, HSVA, RGBA } from 'vs/base/common/color';
 import { Emitter, Event } from 'vs/base/common/event';
 import { Disposable } from 'vs/base/common/lifecycle';
+import 'vs/css!./colorPicker';
 import { ColorPickerModel } from 'vs/editor/contrib/colorPicker/colorPickerModel';
 import { editorHoverBackground } from 'vs/platform/theme/common/colorRegistry';
 import { IThemeService, registerThemingParticipant } from 'vs/platform/theme/common/themeService';
@@ -34,7 +34,7 @@ export class ColorPickerHeader extends Disposable {
 		const colorBox = dom.append(this.domNode, $('.original-color'));
 		colorBox.style.backgroundColor = Color.Format.CSS.format(this.model.originalColor) || '';
 
-		this.backgroundColor = themeService.getTheme().getColor(editorHoverBackground) || Color.white;
+		this.backgroundColor = themeService.getColorTheme().getColor(editorHoverBackground) || Color.white;
 		this._register(registerThemingParticipant((theme, collector) => {
 			this.backgroundColor = theme.getColor(editorHoverBackground) || Color.white;
 		}));
@@ -47,12 +47,12 @@ export class ColorPickerHeader extends Disposable {
 		this._register(model.onDidChangeColor(this.onDidChangeColor, this));
 		this._register(model.onDidChangePresentation(this.onDidChangePresentation, this));
 		this.pickedColorNode.style.backgroundColor = Color.Format.CSS.format(model.color) || '';
-		dom.toggleClass(this.pickedColorNode, 'light', model.color.rgba.a < 0.5 ? this.backgroundColor.isLighter() : model.color.isLighter());
+		this.pickedColorNode.classList.toggle('light', model.color.rgba.a < 0.5 ? this.backgroundColor.isLighter() : model.color.isLighter());
 	}
 
 	private onDidChangeColor(color: Color): void {
 		this.pickedColorNode.style.backgroundColor = Color.Format.CSS.format(color) || '';
-		dom.toggleClass(this.pickedColorNode, 'light', color.rgba.a < 0.5 ? this.backgroundColor.isLighter() : color.isLighter());
+		this.pickedColorNode.classList.toggle('light', color.rgba.a < 0.5 ? this.backgroundColor.isLighter() : color.isLighter());
 		this.onDidChangePresentation();
 	}
 
@@ -163,7 +163,7 @@ class SaturationBox extends Disposable {
 			this.onDidChangePosition(e.offsetX, e.offsetY);
 		}
 
-		this.monitor.startMonitoring(standardMouseMoveMerger, event => this.onDidChangePosition(event.posx - origin.left, event.posy - origin.top), () => null);
+		this.monitor.startMonitoring(<HTMLElement>e.target, e.buttons, standardMouseMoveMerger, event => this.onDidChangePosition(event.posx - origin.left, event.posy - origin.top), () => null);
 
 		const mouseUpListener = dom.addDisposableGenericMouseUpListner(document, () => {
 			this._onColorFlushed.fire();
@@ -264,19 +264,19 @@ abstract class Strip extends Disposable {
 	private onMouseDown(e: MouseEvent): void {
 		const monitor = this._register(new GlobalMouseMoveMonitor<IStandardMouseMoveEventData>());
 		const origin = dom.getDomNodePagePosition(this.domNode);
-		dom.addClass(this.domNode, 'grabbing');
+		this.domNode.classList.add('grabbing');
 
 		if (e.target !== this.slider) {
 			this.onDidChangeTop(e.offsetY);
 		}
 
-		monitor.startMonitoring(standardMouseMoveMerger, event => this.onDidChangeTop(event.posy - origin.top), () => null);
+		monitor.startMonitoring(<HTMLElement>e.target, e.buttons, standardMouseMoveMerger, event => this.onDidChangeTop(event.posy - origin.top), () => null);
 
 		const mouseUpListener = dom.addDisposableGenericMouseUpListner(document, () => {
 			this._onColorFlushed.fire();
 			mouseUpListener.dispose();
 			monitor.stopMonitoring(true);
-			dom.removeClass(this.domNode, 'grabbing');
+			this.domNode.classList.remove('grabbing');
 		}, true);
 	}
 
@@ -298,7 +298,7 @@ class OpacityStrip extends Strip {
 
 	constructor(container: HTMLElement, model: ColorPickerModel) {
 		super(container, model);
-		dom.addClass(this.domNode, 'opacity-strip');
+		this.domNode.classList.add('opacity-strip');
 
 		this._register(model.onDidChangeColor(this.onDidChangeColor, this));
 		this.onDidChangeColor(this.model.color);
@@ -321,7 +321,7 @@ class HueStrip extends Strip {
 
 	constructor(container: HTMLElement, model: ColorPickerModel) {
 		super(container, model);
-		dom.addClass(this.domNode, 'hue-strip');
+		this.domNode.classList.add('hue-strip');
 	}
 
 	protected getValue(color: Color): number {
@@ -335,7 +335,7 @@ export class ColorPickerWidget extends Widget {
 
 	body: ColorPickerBody;
 
-	constructor(container: Node, private readonly model: ColorPickerModel, private pixelRatio: number, themeService: IThemeService) {
+	constructor(container: Node, readonly model: ColorPickerModel, private pixelRatio: number, themeService: IThemeService) {
 		super();
 
 		this._register(onDidChangeZoomLevel(() => this.layout()));
