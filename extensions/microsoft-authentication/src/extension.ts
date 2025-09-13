@@ -3,70 +3,70 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as vscode from 'vscode';
-import { AzureActiveDirectoryService, onDidChangeSessions } from './AADHelper';
-import TelemetryReporter from 'vscode-extension-telemetry';
+import { commands, ExtensionContext, l10n, window, workspace } from 'vscode';
+import * as extensionV1 from './extensionV1';
+import * as extensionV2 from './extensionV2';
+import { MicrosoftAuthenticationTelemetryReporter } from './common/telemetryReporter';
 
-export const DEFAULT_SCOPES = 'https://management.core.windows.net/.default offline_access';
+let implementation: 'msal' | 'msal-no-broker' | 'classic' = 'msal';
+const getImplementation = () => workspace.getConfiguration('microsoft-authentication').get<'msal' | 'msal-no-broker' | 'classic'>('implementation') ?? 'msal';
 
-export async function activate(context: vscode.ExtensionContext) {
-	const { name, version, aiKey } = context.extension.packageJSON as { name: string, version: string, aiKey: string };
-	const telemetryReporter = new TelemetryReporter(name, version, aiKey);
-
-	const loginService = new AzureActiveDirectoryService(context);
-	context.subscriptions.push(loginService);
-
-	await loginService.initialize();
-
-	context.subscriptions.push(vscode.authentication.registerAuthenticationProvider('microsoft', 'Microsoft', {
-		onDidChangeSessions: onDidChangeSessions.event,
-		getSessions: (scopes: string[]) => loginService.getSessions(scopes),
-		createSession: async (scopes: string[]) => {
-			try {
-				/* __GDPR__
-					"login" : {
-						"scopes": { "classification": "PublicNonPersonalData", "purpose": "FeatureInsight" }
-					}
-				*/
-				telemetryReporter.sendTelemetryEvent('login', {
-					// Get rid of guids from telemetry.
-					scopes: JSON.stringify(scopes.map(s => s.replace(/[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}/i, '{guid}'))),
-				});
-
-				const session = await loginService.createSession(scopes.sort().join(' '));
-				onDidChangeSessions.fire({ added: [session], removed: [], changed: [] });
-				return session;
-			} catch (e) {
-				/* __GDPR__
-					"loginFailed" : { }
-				*/
-				telemetryReporter.sendTelemetryEvent('loginFailed');
-
-				throw e;
-			}
-		},
-		removeSession: async (id: string) => {
-			try {
-				/* __GDPR__
-					"logout" : { }
-				*/
-				telemetryReporter.sendTelemetryEvent('logout');
-
-				const session = await loginService.removeSession(id);
-				if (session) {
-					onDidChangeSessions.fire({ added: [], removed: [session], changed: [] });
-				}
-			} catch (e) {
-				/* __GDPR__
-					"logoutFailed" : { }
-				*/
-				telemetryReporter.sendTelemetryEvent('logoutFailed');
-			}
+export async function activate(context: ExtensionContext) {
+	const mainTelemetryReporter = new MicrosoftAuthenticationTelemetryReporter(context.extension.packageJSON.aiKey);
+	implementation = getImplementation();
+	context.subscriptions.push(workspace.onDidChangeConfiguration(async e => {
+		if (!e.affectsConfiguration('microsoft-authentication')) {
+			return;
 		}
-	}, { supportsMultipleAccounts: true }));
+		if (implementation === getImplementation()) {
+			return;
+		}
 
-	return;
+		// Allow for the migration to be re-attempted if the user switches back to the MSAL implementation
+		context.globalState.update('msalMigration', undefined);
+
+		const reload = l10n.t('Reload');
+		const result = await window.showInformationMessage(
+			'Reload required',
+			{
+				modal: true,
+				detail: l10n.t('Microsoft Account configuration has been changed.'),
+			},
+			reload
+		);
+
+		if (result === reload) {
+			commands.executeCommand('workbench.action.reloadWindow');
+		}
+	}));
+	const isNodeEnvironment = typeof process !== 'undefined' && typeof process?.versions?.node === 'string';
+
+	// Only activate the new extension if we are not running in a browser environment
+	if (!isNodeEnvironment) {
+		mainTelemetryReporter.sendActivatedWithClassicImplementationEvent('web');
+		return await extensionV1.activate(context, mainTelemetryReporter.telemetryReporter);
+	}
+
+	switch (implementation) {
+		case 'msal-no-broker':
+			mainTelemetryReporter.sendActivatedWithMsalNoBrokerEvent();
+			await extensionV2.activate(context, mainTelemetryReporter);
+			break;
+		case 'classic':
+			mainTelemetryReporter.sendActivatedWithClassicImplementationEvent('setting');
+			await extensionV1.activate(context, mainTelemetryReporter.telemetryReporter);
+			break;
+		case 'msal':
+		default:
+			await extensionV2.activate(context, mainTelemetryReporter);
+			break;
+	}
 }
 
-// this method is called when your extension is deactivated
-export function deactivate() { }
+export function deactivate() {
+	if (implementation !== 'classic') {
+		extensionV2.deactivate();
+	} else {
+		extensionV1.deactivate();
+	}
+}

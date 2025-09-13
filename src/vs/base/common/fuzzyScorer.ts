@@ -3,13 +3,13 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { CharCode } from 'vs/base/common/charCode';
-import { compareAnything } from 'vs/base/common/comparers';
-import { createMatches as createFuzzyMatches, fuzzyScore, IMatch, isUpper, matchesPrefix } from 'vs/base/common/filters';
-import { hash } from 'vs/base/common/hash';
-import { sep } from 'vs/base/common/path';
-import { isLinux, isWindows } from 'vs/base/common/platform';
-import { equalsIgnoreCase, stripWildcards } from 'vs/base/common/strings';
+import { CharCode } from './charCode.js';
+import { compareAnything } from './comparers.js';
+import { createMatches as createFuzzyMatches, fuzzyScore, IMatch, isUpper, matchesPrefix } from './filters.js';
+import { hash } from './hash.js';
+import { sep } from './path.js';
+import { isLinux, isWindows } from './platform.js';
+import { equalsIgnoreCase } from './strings.js';
 
 //#region Fuzzy scorer
 
@@ -19,7 +19,7 @@ export type FuzzyScorerCache = { [key: string]: IItemScore };
 const NO_MATCH = 0;
 const NO_SCORE: FuzzyScore = [NO_MATCH, []];
 
-// const DEBUG = false;
+// const DEBUG = true;
 // const DEBUG_MATRIX = false;
 
 export function scoreFuzzy(target: string, query: string, queryLower: string, allowNonContiguousMatches: boolean): FuzzyScore {
@@ -149,7 +149,7 @@ function doScoreFuzzy(query: string, queryLower: string, queryLength: number, ta
 
 	// Print matrix
 	// if (DEBUG_MATRIX) {
-	// printMatrix(query, target, matches, scores);
+	// 	printMatrix(query, target, matches, scores);
 	// }
 
 	return [scores[queryLength * targetLength - 1], positions.reverse()];
@@ -162,19 +162,25 @@ function computeCharScore(queryCharAtIndex: string, queryLowerCharAtIndex: strin
 		return score; // no match of characters
 	}
 
+	// if (DEBUG) {
+	// 	console.groupCollapsed(`%cFound a match of char: ${queryLowerCharAtIndex} at index ${targetIndex}`, 'font-weight: normal');
+	// }
+
 	// Character match bonus
 	score += 1;
 
 	// if (DEBUG) {
-	// console.groupCollapsed(`%cCharacter match bonus: +1 (char: ${queryLowerCharAtIndex} at index ${targetIndex}, total score: ${score})`, 'font-weight: normal');
+	// 	console.log(`%cCharacter match bonus: +1`, 'font-weight: normal');
 	// }
 
-	// Consecutive match bonus
+	// Consecutive match bonus: sequences up to 3 get the full bonus (6)
+	// and the remainder gets half the bonus (3). This helps reduce the
+	// overall boost for long sequence matches.
 	if (matchesSequenceLength > 0) {
-		score += (matchesSequenceLength * 5);
+		score += (Math.min(matchesSequenceLength, 3) * 6) + (Math.max(0, matchesSequenceLength - 3) * 3);
 
 		// if (DEBUG) {
-		// console.log(`Consecutive match bonus: +${matchesSequenceLength * 5}`);
+		// 	console.log(`Consecutive match bonus: +${matchesSequenceLength * 5}`);
 		// }
 	}
 
@@ -204,12 +210,15 @@ function computeCharScore(queryCharAtIndex: string, queryLowerCharAtIndex: strin
 			score += separatorBonus;
 
 			// if (DEBUG) {
-			// console.log(`After separator bonus: +${separatorBonus}`);
+			// 	console.log(`After separator bonus: +${separatorBonus}`);
 			// }
 		}
 
-		// Inside word upper case bonus (camel case)
-		else if (isUpper(target.charCodeAt(targetIndex))) {
+		// Inside word upper case bonus (camel case). We only give this bonus if we're not in a contiguous sequence.
+		// For example:
+		// NPE => NullPointerException = boost
+		// HTTP => HTTP = not boost
+		else if (isUpper(target.charCodeAt(targetIndex)) && matchesSequenceLength === 0) {
 			score += 2;
 
 			// if (DEBUG) {
@@ -219,6 +228,7 @@ function computeCharScore(queryCharAtIndex: string, queryLowerCharAtIndex: strin
 	}
 
 	// if (DEBUG) {
+	// 	console.log(`Total score: ${score}`);
 	// 	console.groupEnd();
 	// }
 
@@ -312,7 +322,7 @@ function doScoreFuzzy2Multiple(target: string, query: IPreparedQueryPiece[], pat
 }
 
 function doScoreFuzzy2Single(target: string, query: IPreparedQueryPiece, patternStart: number, wordStart: number): FuzzyScore2 {
-	const score = fuzzyScore(query.original, query.originalLowercase, patternStart, target, target.toLowerCase(), wordStart, true);
+	const score = fuzzyScore(query.original, query.originalLowercase, patternStart, target, target.toLowerCase(), wordStart, { firstMatchCanBeWeak: true, boostFullMatch: true });
 	if (!score) {
 		return NO_SCORE2;
 	}
@@ -346,7 +356,7 @@ export interface IItemScore {
 	descriptionMatch?: IMatch[];
 }
 
-const NO_ITEM_SCORE: IItemScore = Object.freeze({ score: 0 });
+const NO_ITEM_SCORE = Object.freeze<IItemScore>({ score: 0 });
 
 export interface IItemAccessor<T> {
 
@@ -882,7 +892,7 @@ export function prepareQuery(original: string): IPreparedQuery {
 	return { original, originalLowercase, pathNormalized, normalized, normalizedLowercase, values, containsPathSeparator, expectContiguousMatch: expectExactMatch };
 }
 
-function normalizeQuery(original: string): { pathNormalized: string, normalized: string, normalizedLowercase: string } {
+function normalizeQuery(original: string): { pathNormalized: string; normalized: string; normalizedLowercase: string } {
 	let pathNormalized: string;
 	if (isWindows) {
 		pathNormalized = original.replace(/\//g, sep); // Help Windows users to search for paths when using slash
@@ -890,8 +900,12 @@ function normalizeQuery(original: string): { pathNormalized: string, normalized:
 		pathNormalized = original.replace(/\\/g, sep); // Help macOS/Linux users to search for paths when using backslash
 	}
 
-	// we remove quotes here because quotes are used for exact match search
-	const normalized = stripWildcards(pathNormalized).replace(/\s|"/g, '');
+	// remove certain characters that help find better results:
+	// - quotes: are used for exact match search
+	// - wildcards: are used for fuzzy matching
+	// - whitespace: are used to separate queries
+	// - ellipsis: sometimes used to indicate any path segments
+	const normalized = pathNormalized.replace(/[\*\u2026\s"]/g, '');
 
 	return {
 		pathNormalized,

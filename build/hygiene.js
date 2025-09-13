@@ -2,6 +2,7 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
+// @ts-check
 
 const filter = require('gulp-filter');
 const es = require('event-stream');
@@ -10,7 +11,8 @@ const vfs = require('vinyl-fs');
 const path = require('path');
 const fs = require('fs');
 const pall = require('p-all');
-const { all, copyrightFilter, indentationFilter, jsHygieneFilter, tsHygieneFilter } = require('./filters');
+
+const { all, copyrightFilter, unicodeFilter, indentationFilter, tsFormattingFilter, eslintFilter, stylelintFilter } = require('./filters');
 
 const copyrightHeaderLines = [
 	'/*---------------------------------------------------------------------------------------------',
@@ -19,9 +21,14 @@ const copyrightHeaderLines = [
 	' *--------------------------------------------------------------------------------------------*/',
 ];
 
+/**
+ * @param {string[] | NodeJS.ReadWriteStream} some
+ * @param {boolean} linting
+ */
 function hygiene(some, linting = true) {
-	const gulpeslint = require('gulp-eslint');
-	const tsfmt = require('typescript-formatter');
+	const eslint = require('./gulp-eslint');
+	const gulpstylelint = require('./stylelint');
+	const formatter = require('./lib/formatter');
 
 	let errorCount = 0;
 
@@ -36,8 +43,47 @@ function hygiene(some, linting = true) {
 		this.emit('data', file);
 	});
 
-	const indentation = es.through(function (file) {
+	const unicode = es.through(function (file) {
+		/** @type {string[]} */
 		const lines = file.contents.toString('utf8').split(/\r\n|\r|\n/);
+		file.__lines = lines;
+		const allowInComments = lines.some(line => /allow-any-unicode-comment-file/.test(line));
+		let skipNext = false;
+		lines.forEach((line, i) => {
+			if (/allow-any-unicode-next-line/.test(line)) {
+				skipNext = true;
+				return;
+			}
+			if (skipNext) {
+				skipNext = false;
+				return;
+			}
+			// If unicode is allowed in comments, trim the comment from the line
+			if (allowInComments) {
+				if (line.match(/\s+(\*)/)) { // Naive multi-line comment check
+					line = '';
+				} else {
+					const index = line.indexOf('\/\/');
+					line = index === -1 ? line : line.substring(0, index);
+				}
+			}
+			// Please do not add symbols that resemble ASCII letters!
+			// eslint-disable-next-line no-misleading-character-class
+			const m = /([^\t\n\r\x20-\x7E⊃⊇✔︎✓🎯🧪✍️⚠️🛑🔴🚗🚙🚕🎉✨❗⇧⌥⌘×÷¦⋯…↑↓￫→←↔⟷·•●◆▼⟪⟫┌└├⏎↩√φ]+)/g.exec(line);
+			if (m) {
+				console.error(
+					file.relative + `(${i + 1},${m.index + 1}): Unexpected unicode character: "${m[0]}" (charCode: ${m[0].charCodeAt(0)}). To suppress, use // allow-any-unicode-next-line`
+				);
+				errorCount++;
+			}
+		});
+
+		this.emit('data', file);
+	});
+
+	const indentation = es.through(function (file) {
+		/** @type {string[]} */
+		const lines = file.__lines || file.contents.toString('utf8').split(/\r\n|\r|\n/);
 		file.__lines = lines;
 
 		lines.forEach((line, i) => {
@@ -73,42 +119,26 @@ function hygiene(some, linting = true) {
 	});
 
 	const formatting = es.map(function (file, cb) {
-		tsfmt
-			.processString(file.path, file.contents.toString('utf8'), {
-				verify: false,
-				tsfmt: true,
-				// verbose: true,
-				// keep checkJS happy
-				editorconfig: undefined,
-				replace: undefined,
-				tsconfig: undefined,
-				tsconfigFile: undefined,
-				tsfmtFile: undefined,
-				vscode: undefined,
-				vscodeFile: undefined,
-			})
-			.then(
-				(result) => {
-					let original = result.src.replace(/\r\n/gm, '\n');
-					let formatted = result.dest.replace(/\r\n/gm, '\n');
+		try {
+			const rawInput = file.contents.toString('utf8');
+			const rawOutput = formatter.format(file.path, rawInput);
 
-					if (original !== formatted) {
-						console.error(
-							`File not formatted. Run the 'Format Document' command to fix it:`,
-							file.relative
-						);
-						errorCount++;
-					}
-					cb(null, file);
-				},
-				(err) => {
-					cb(err);
-				}
-			);
+			const original = rawInput.replace(/\r\n/gm, '\n');
+			const formatted = rawOutput.replace(/\r\n/gm, '\n');
+			if (original !== formatted) {
+				console.error(
+					`File not formatted. Run the 'Format Document' command to fix it:`,
+					file.relative
+				);
+				errorCount++;
+			}
+			cb(undefined, file);
+		} catch (err) {
+			cb(err);
+		}
 	});
 
 	let input;
-
 	if (Array.isArray(some) || typeof some === 'string' || !some) {
 		const options = { base: '.', follow: true, allowEmpty: true };
 		if (some) {
@@ -121,38 +151,50 @@ function hygiene(some, linting = true) {
 	}
 
 	const productJsonFilter = filter('product.json', { restore: true });
+	const snapshotFilter = filter(['**', '!**/*.snap', '!**/*.snap.actual']);
+	const yarnLockFilter = filter(['**', '!**/yarn.lock']);
+	const unicodeFilterStream = filter(unicodeFilter, { restore: true });
 
 	const result = input
 		.pipe(filter((f) => !f.stat.isDirectory()))
+		.pipe(snapshotFilter)
+		.pipe(yarnLockFilter)
 		.pipe(productJsonFilter)
 		.pipe(process.env['BUILD_SOURCEVERSION'] ? es.through() : productJson)
 		.pipe(productJsonFilter.restore)
+		.pipe(unicodeFilterStream)
+		.pipe(unicode)
+		.pipe(unicodeFilterStream.restore)
 		.pipe(filter(indentationFilter))
 		.pipe(indentation)
 		.pipe(filter(copyrightFilter))
 		.pipe(copyrights);
 
+	/** @type {import('stream').Stream[]} */
 	const streams = [
-		result.pipe(filter(tsHygieneFilter)).pipe(formatting)
+		result.pipe(filter(tsFormattingFilter)).pipe(formatting)
 	];
 
 	if (linting) {
 		streams.push(
 			result
-				.pipe(filter([...jsHygieneFilter, ...tsHygieneFilter]))
+				.pipe(filter(eslintFilter))
 				.pipe(
-					gulpeslint({
-						configFile: '.eslintrc.json',
-						rulePaths: ['./build/lib/eslint'],
-					})
-				)
-				.pipe(gulpeslint.formatEach('compact'))
-				.pipe(
-					gulpeslint.results((results) => {
+					eslint((results) => {
 						errorCount += results.warningCount;
 						errorCount += results.errorCount;
 					})
 				)
+		);
+		streams.push(
+			result.pipe(filter(stylelintFilter)).pipe(gulpstylelint(((message, isError) => {
+				if (isError) {
+					console.error(message);
+					errorCount++;
+				} else {
+					console.warn(message);
+				}
+			})))
 		);
 	}
 
@@ -185,6 +227,9 @@ function hygiene(some, linting = true) {
 
 module.exports.hygiene = hygiene;
 
+/**
+ * @param {string[]} paths
+ */
 function createGitIndexVinyls(paths) {
 	const cp = require('child_process');
 	const repositoryPath = process.cwd();
@@ -203,7 +248,7 @@ function createGitIndexVinyls(paths) {
 
 				cp.exec(
 					process.platform === 'win32' ? `git show :${relativePath}` : `git show ':${relativePath}'`,
-					{ maxBuffer: 2000 * 1024, encoding: 'buffer' },
+					{ maxBuffer: stat.size, encoding: 'buffer' },
 					(err, out) => {
 						if (err) {
 							return e(err);
@@ -259,12 +304,14 @@ if (require.main === module) {
 
 					createGitIndexVinyls(some)
 						.then(
-							(vinyls) =>
-								new Promise((c, e) =>
-									hygiene(es.readArray(vinyls))
+							(vinyls) => {
+								/** @type {Promise<void>} */
+								return (new Promise((c, e) =>
+									hygiene(es.readArray(vinyls).pipe(filter(all)))
 										.on('end', () => c())
 										.on('error', e)
-								)
+								))
+							}
 						)
 						.catch((err) => {
 							console.error();

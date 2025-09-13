@@ -35,7 +35,9 @@ export class Editor {
 		await this.code.waitForActiveElement(RENAME_INPUT);
 		await this.code.waitForSetValue(RENAME_INPUT, to);
 
-		await this.code.dispatchKeybinding('enter');
+		await this.code.dispatchKeybinding('enter', async () => {
+			// TODO: Add an accept callback to verify the keybinding was successful
+		});
 	}
 
 	async gotoDefinition(filename: string, term: string, line: number): Promise<void> {
@@ -49,15 +51,6 @@ export class Editor {
 		const peek = new References(this.code);
 		await peek.waitUntilOpen();
 		return peek;
-	}
-
-	async waitForHighlightingLine(filename: string, line: number): Promise<void> {
-		const currentLineIndex = await this.getViewLineIndex(filename, line);
-		if (currentLineIndex) {
-			await this.code.waitForElement(`.monaco-editor .view-overlays>:nth-child(${currentLineIndex}) .current-line`);
-			return;
-		}
-		throw new Error('Cannot find line ' + line);
 	}
 
 	private async getSelector(filename: string, term: string, line: number): Promise<string> {
@@ -87,23 +80,35 @@ export class Editor {
 	async waitForEditorFocus(filename: string, lineNumber: number, selectorPrefix = ''): Promise<void> {
 		const editor = [selectorPrefix || '', EDITOR(filename)].join(' ');
 		const line = `${editor} .view-lines > .view-line:nth-child(${lineNumber})`;
-		const textarea = `${editor} textarea`;
+		const editContext = `${editor} ${this._editContextSelector()}`;
 
 		await this.code.waitAndClick(line, 1, 1);
-		await this.code.waitForActiveElement(textarea);
+		await this.code.waitForActiveElement(editContext);
 	}
 
 	async waitForTypeInEditor(filename: string, text: string, selectorPrefix = ''): Promise<any> {
+		if (text.includes('\n')) {
+			throw new Error('waitForTypeInEditor does not support new lines, use either a long single line or dispatchKeybinding(\'Enter\')');
+		}
 		const editor = [selectorPrefix || '', EDITOR(filename)].join(' ');
 
 		await this.code.waitForElement(editor);
 
-		const textarea = `${editor} textarea`;
-		await this.code.waitForActiveElement(textarea);
+		const editContext = `${editor} ${this._editContextSelector()}`;
+		await this.code.waitForActiveElement(editContext);
 
-		await this.code.waitForTypeInEditor(textarea, text);
+		await this.code.waitForTypeInEditor(editContext, text);
 
 		await this.waitForEditorContents(filename, c => c.indexOf(text) > -1, selectorPrefix);
+	}
+
+	async waitForEditorSelection(filename: string, accept: (selection: { selectionStart: number; selectionEnd: number }) => boolean): Promise<void> {
+		const selector = `${EDITOR(filename)} ${this._editContextSelector()}`;
+		await this.code.waitForEditorSelection(selector, accept);
+	}
+
+	private _editContextSelector() {
+		return !this.code.editContextEnabled ? 'textarea' : '.native-edit-context';
 	}
 
 	async waitForEditorContents(filename: string, accept: (contents: string) => boolean, selectorPrefix = ''): Promise<any> {

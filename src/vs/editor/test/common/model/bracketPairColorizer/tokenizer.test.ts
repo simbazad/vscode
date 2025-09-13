@@ -3,52 +3,90 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import assert = require('assert');
-import { DisposableStore } from 'vs/base/common/lifecycle';
-import { TokenizationResult2 } from 'vs/editor/common/core/token';
-import { LanguageAgnosticBracketTokens } from 'vs/editor/common/model/bracketPairColorizer/brackets';
-import { Length, lengthAdd, lengthsToRange, lengthZero } from 'vs/editor/common/model/bracketPairColorizer/length';
-import { TextBufferTokenizer, Token, Tokenizer, TokenKind } from 'vs/editor/common/model/bracketPairColorizer/tokenizer';
-import { TextModel } from 'vs/editor/common/model/textModel';
-import { IState, ITokenizationSupport, LanguageId, LanguageIdentifier, MetadataConsts, StandardTokenType, TokenizationRegistry } from 'vs/editor/common/modes';
-import { LanguageConfigurationRegistry } from 'vs/editor/common/modes/languageConfigurationRegistry';
-import { createTextModel } from 'vs/editor/test/common/editorTestUtils';
+import assert from 'assert';
+import { DisposableStore } from '../../../../../base/common/lifecycle.js';
+import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
+import { LanguageId, MetadataConsts, StandardTokenType } from '../../../../common/encodedTokenAttributes.js';
+import { EncodedTokenizationResult, IState, ITokenizationSupport, TokenizationRegistry } from '../../../../common/languages.js';
+import { ILanguageService } from '../../../../common/languages/language.js';
+import { ILanguageConfigurationService } from '../../../../common/languages/languageConfigurationRegistry.js';
+import { LanguageAgnosticBracketTokens } from '../../../../common/model/bracketPairsTextModelPart/bracketPairsTree/brackets.js';
+import { Length, lengthAdd, lengthsToRange, lengthZero } from '../../../../common/model/bracketPairsTextModelPart/bracketPairsTree/length.js';
+import { DenseKeyProvider } from '../../../../common/model/bracketPairsTextModelPart/bracketPairsTree/smallImmutableSet.js';
+import { TextBufferTokenizer, Token, Tokenizer, TokenKind } from '../../../../common/model/bracketPairsTextModelPart/bracketPairsTree/tokenizer.js';
+import { TextModel } from '../../../../common/model/textModel.js';
+import { createModelServices, instantiateTextModel } from '../../testTextModel.js';
 
 suite('Bracket Pair Colorizer - Tokenizer', () => {
-	test('Basic', () => {
-		const mode1 = new LanguageIdentifier('testMode1', 2);
 
-		const tStandard = (text: string) => new TokenInfo(text, mode1.id, StandardTokenType.Other);
-		const tComment = (text: string) => new TokenInfo(text, mode1.id, StandardTokenType.Comment);
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('Basic', () => {
+		const mode1 = 'testMode1';
+		const disposableStore = new DisposableStore();
+		const instantiationService = createModelServices(disposableStore);
+		const languageConfigurationService = instantiationService.get(ILanguageConfigurationService);
+		const languageService = instantiationService.get(ILanguageService);
+		disposableStore.add(languageService.registerLanguage({ id: mode1 }));
+		const encodedMode1 = languageService.languageIdCodec.encodeLanguageId(mode1);
+
+		const denseKeyProvider = new DenseKeyProvider<string>();
+
+		const tStandard = (text: string) => new TokenInfo(text, encodedMode1, StandardTokenType.Other, true);
+		const tComment = (text: string) => new TokenInfo(text, encodedMode1, StandardTokenType.Comment, true);
 		const document = new TokenizedDocument([
 			tStandard(' { } '), tStandard('be'), tStandard('gin end'), tStandard('\n'),
 			tStandard('hello'), tComment('{'), tStandard('}'),
 		]);
 
-		const disposableStore = new DisposableStore();
-		disposableStore.add(TokenizationRegistry.register(mode1.language, document.getTokenizationSupport()));
-		disposableStore.add(LanguageConfigurationRegistry.register(mode1, {
-			brackets: [['{', '}'], ['[', ']'], ['(', ')']],
+		disposableStore.add(TokenizationRegistry.register(mode1, document.getTokenizationSupport()));
+		disposableStore.add(languageConfigurationService.register(mode1, {
+			brackets: [['{', '}'], ['[', ']'], ['(', ')'], ['begin', 'end']],
 		}));
 
-		const brackets = new LanguageAgnosticBracketTokens([['begin', 'end']]);
+		const model = disposableStore.add(instantiateTextModel(instantiationService, document.getText(), mode1));
+		model.tokenization.forceTokenization(model.getLineCount());
 
-		const model = createTextModel(document.getText(), {}, mode1);
-		model.forceTokenization(model.getLineCount());
+		const brackets = new LanguageAgnosticBracketTokens(denseKeyProvider, l => languageConfigurationService.getLanguageConfiguration(l));
 
 		const tokens = readAllTokens(new TextBufferTokenizer(model, brackets));
 
-		assert.deepStrictEqual(toArr(tokens, model), [
-			{ category: -1, kind: 'Text', languageId: -1, text: ' ', },
-			{ category: 2000, kind: 'OpeningBracket', languageId: 2, text: '{', },
-			{ category: -1, kind: 'Text', languageId: -1, text: ' ', },
-			{ category: 2000, kind: 'ClosingBracket', languageId: 2, text: '}', },
-			{ category: -1, kind: 'Text', languageId: -1, text: ' ', },
-			{ category: 2004, kind: 'OpeningBracket', languageId: 2, text: 'begin', },
-			{ category: -1, kind: 'Text', languageId: -1, text: ' ', },
-			{ category: 2004, kind: 'ClosingBracket', languageId: 2, text: 'end', },
-			{ category: -1, kind: 'Text', languageId: -1, text: '\nhello{', },
-			{ category: 2000, kind: 'ClosingBracket', languageId: 2, text: '}', }
+		assert.deepStrictEqual(toArr(tokens, model, denseKeyProvider), [
+			{ text: ' ', bracketId: null, bracketIds: [], kind: 'Text' },
+			{
+				text: '{',
+				bracketId: 'testMode1:::{',
+				bracketIds: ['testMode1:::{'],
+				kind: 'OpeningBracket',
+			},
+			{ text: ' ', bracketId: null, bracketIds: [], kind: 'Text' },
+			{
+				text: '}',
+				bracketId: 'testMode1:::{',
+				bracketIds: ['testMode1:::{'],
+				kind: 'ClosingBracket',
+			},
+			{ text: ' ', bracketId: null, bracketIds: [], kind: 'Text' },
+			{
+				text: 'begin',
+				bracketId: 'testMode1:::begin',
+				bracketIds: ['testMode1:::begin'],
+				kind: 'OpeningBracket',
+			},
+			{ text: ' ', bracketId: null, bracketIds: [], kind: 'Text' },
+			{
+				text: 'end',
+				bracketId: 'testMode1:::begin',
+				bracketIds: ['testMode1:::begin'],
+				kind: 'ClosingBracket',
+			},
+			{ text: '\nhello{', bracketId: null, bracketIds: [], kind: 'Text' },
+			{
+				text: '}',
+				bracketId: 'testMode1:::{',
+				bracketIds: ['testMode1:::{'],
+				kind: 'ClosingBracket',
+			},
 		]);
 
 		disposableStore.dispose();
@@ -67,30 +105,30 @@ function readAllTokens(tokenizer: Tokenizer): Token[] {
 	return tokens;
 }
 
-function toArr(tokens: Token[], model: TextModel): any[] {
+function toArr(tokens: Token[], model: TextModel, keyProvider: DenseKeyProvider<string>): any[] {
 	const result = new Array<any>();
 	let offset = lengthZero;
 	for (const token of tokens) {
-		result.push(tokenToObj(token, offset, model));
+		result.push(tokenToObj(token, offset, model, keyProvider));
 		offset = lengthAdd(offset, token.length);
 	}
 	return result;
 }
 
-function tokenToObj(token: Token, offset: Length, model: TextModel): any {
+function tokenToObj(token: Token, offset: Length, model: TextModel, keyProvider: DenseKeyProvider<any>): any {
 	return {
 		text: model.getValueInRange(lengthsToRange(offset, lengthAdd(offset, token.length))),
-		category: token.category,
+		bracketId: keyProvider.reverseLookup(token.bracketId) || null,
+		bracketIds: keyProvider.reverseLookupSet(token.bracketIds),
 		kind: {
 			[TokenKind.ClosingBracket]: 'ClosingBracket',
 			[TokenKind.OpeningBracket]: 'OpeningBracket',
 			[TokenKind.Text]: 'Text',
-		}[token.kind],
-		languageId: token.languageId,
+		}[token.kind]
 	};
 }
 
-class TokenizedDocument {
+export class TokenizedDocument {
 	private readonly tokensByLine: readonly TokenInfo[][];
 	constructor(tokens: TokenInfo[]) {
 		const tokensByLine = new Array<TokenInfo[]>();
@@ -139,7 +177,7 @@ class TokenizedDocument {
 		return {
 			getInitialState: () => new State(0),
 			tokenize: () => { throw new Error('Method not implemented.'); },
-			tokenize2: (line: string, hasEOL: boolean, state: IState, offsetDelta: number): TokenizationResult2 => {
+			tokenizeEncoded: (line: string, hasEOL: boolean, state: IState): EncodedTokenizationResult => {
 				const state2 = state as State;
 				const tokens = this.tokensByLine[state2.lineNumber];
 				const arr = new Array<number>();
@@ -149,23 +187,30 @@ class TokenizedDocument {
 					offset += t.text.length;
 				}
 
-				return new TokenizationResult2(new Uint32Array(arr), new State(state2.lineNumber + 1));
+				return new EncodedTokenizationResult(new Uint32Array(arr), new State(state2.lineNumber + 1));
 			}
 		};
 	}
 }
 
-class TokenInfo {
-	constructor(public readonly text: string, public readonly languageId: LanguageId, public readonly tokenType: StandardTokenType) { }
+export class TokenInfo {
+	constructor(
+		public readonly text: string,
+		public readonly languageId: LanguageId,
+		public readonly tokenType: StandardTokenType,
+		public readonly hasBalancedBrackets: boolean,
+	) { }
 
 	getMetadata(): number {
 		return (
-			(this.languageId << MetadataConsts.LANGUAGEID_OFFSET)
-			| (this.tokenType << MetadataConsts.TOKEN_TYPE_OFFSET)
-		) >>> 0;
+			(((this.languageId << MetadataConsts.LANGUAGEID_OFFSET) |
+				(this.tokenType << MetadataConsts.TOKEN_TYPE_OFFSET)) >>>
+				0) |
+			(this.hasBalancedBrackets ? MetadataConsts.BALANCED_BRACKETS_MASK : 0)
+		);
 	}
 
 	withText(text: string): TokenInfo {
-		return new TokenInfo(text, this.languageId, this.tokenType);
+		return new TokenInfo(text, this.languageId, this.tokenType, this.hasBalancedBrackets);
 	}
 }

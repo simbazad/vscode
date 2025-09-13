@@ -3,8 +3,9 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { clearNode, createCSSRule, createStyleSheet } from 'vs/base/browser/dom';
-import { RunOnceScheduler } from 'vs/base/common/async';
+import { clearNode } from '../../../base/browser/dom.js';
+import { createCSSRule, createStyleSheet } from '../../../base/browser/domStylesheets.js';
+import { RunOnceScheduler } from '../../../base/common/async.js';
 
 export enum ZIndex {
 	Base = 0,
@@ -64,7 +65,7 @@ class ZIndexRegistry {
 		this.zIndexMap.forEach((zIndex, name) => {
 			ruleBuilder += `${this.getVarName(name)}: ${zIndex};\n`;
 		});
-		createCSSRule('*', ruleBuilder, this.styleSheet);
+		createCSSRule(':root', ruleBuilder, this.styleSheet);
 	}
 }
 

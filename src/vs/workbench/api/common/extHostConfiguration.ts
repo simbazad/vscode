@@ -3,23 +3,23 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { mixin, deepClone } from 'vs/base/common/objects';
-import { Event, Emitter } from 'vs/base/common/event';
+import { mixin, deepClone } from '../../../base/common/objects.js';
+import { Event, Emitter } from '../../../base/common/event.js';
 import type * as vscode from 'vscode';
-import { ExtHostWorkspace, IExtHostWorkspace } from 'vs/workbench/api/common/extHostWorkspace';
-import { ExtHostConfigurationShape, MainThreadConfigurationShape, IConfigurationInitData, MainContext } from './extHost.protocol';
-import { ConfigurationTarget as ExtHostConfigurationTarget } from './extHostTypes';
-import { ConfigurationTarget, IConfigurationChange, IConfigurationData, IConfigurationOverrides } from 'vs/platform/configuration/common/configuration';
-import { Configuration, ConfigurationChangeEvent } from 'vs/platform/configuration/common/configurationModels';
-import { ConfigurationScope, OVERRIDE_PROPERTY_PATTERN } from 'vs/platform/configuration/common/configurationRegistry';
-import { isObject } from 'vs/base/common/types';
-import { ExtensionIdentifier, IExtensionDescription } from 'vs/platform/extensions/common/extensions';
-import { Barrier } from 'vs/base/common/async';
-import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
-import { IExtHostRpcService } from 'vs/workbench/api/common/extHostRpcService';
-import { ILogService } from 'vs/platform/log/common/log';
-import { Workspace } from 'vs/platform/workspace/common/workspace';
-import { URI } from 'vs/base/common/uri';
+import { ExtHostWorkspace, IExtHostWorkspace } from './extHostWorkspace.js';
+import { ExtHostConfigurationShape, MainThreadConfigurationShape, IConfigurationInitData, MainContext } from './extHost.protocol.js';
+import { ConfigurationTarget as ExtHostConfigurationTarget } from './extHostTypes.js';
+import { ConfigurationTarget, IConfigurationChange, IConfigurationData, IConfigurationOverrides } from '../../../platform/configuration/common/configuration.js';
+import { Configuration, ConfigurationChangeEvent } from '../../../platform/configuration/common/configurationModels.js';
+import { ConfigurationScope, OVERRIDE_PROPERTY_REGEX } from '../../../platform/configuration/common/configurationRegistry.js';
+import { isObject } from '../../../base/common/types.js';
+import { ExtensionIdentifier, IExtensionDescription } from '../../../platform/extensions/common/extensions.js';
+import { Barrier } from '../../../base/common/async.js';
+import { createDecorator } from '../../../platform/instantiation/common/instantiation.js';
+import { IExtHostRpcService } from './extHostRpcService.js';
+import { ILogService } from '../../../platform/log/common/log.js';
+import { Workspace } from '../../../platform/workspace/common/workspace.js';
+import { URI } from '../../../base/common/uri.js';
 
 function lookUp(tree: any, key: string) {
 	if (key) {
@@ -32,15 +32,19 @@ function lookUp(tree: any, key: string) {
 	}
 }
 
-type ConfigurationInspect<T> = {
+export type ConfigurationInspect<T> = {
 	key: string;
 
 	defaultValue?: T;
+	globalLocalValue?: T;
+	globalRemoteValue?: T;
 	globalValue?: T;
-	workspaceValue?: T,
-	workspaceFolderValue?: T,
+	workspaceValue?: T;
+	workspaceFolderValue?: T;
 
 	defaultLanguageValue?: T;
+	globalLocalLanguageValue?: T;
+	globalRemoteLanguageValue?: T;
 	globalLanguageValue?: T;
 	workspaceLanguageValue?: T;
 	workspaceFolderLanguageValue?: T;
@@ -52,7 +56,7 @@ function isUri(thing: any): thing is vscode.Uri {
 	return thing instanceof URI;
 }
 
-function isResourceLanguage(thing: any): thing is { uri: URI, languageId: string } {
+function isResourceLanguage(thing: any): thing is { uri: URI; languageId: string } {
 	return thing
 		&& thing.uri instanceof URI
 		&& (thing.languageId && typeof thing.languageId === 'string');
@@ -139,7 +143,7 @@ export class ExtHostConfigProvider {
 		this._proxy = proxy;
 		this._logService = logService;
 		this._extHostWorkspace = extHostWorkspace;
-		this._configuration = Configuration.parse(data);
+		this._configuration = Configuration.parse(data, logService);
 		this._configurationScopes = this._toMap(data.configurationScopes);
 	}
 
@@ -149,16 +153,14 @@ export class ExtHostConfigProvider {
 
 	$acceptConfigurationChanged(data: IConfigurationInitData, change: IConfigurationChange) {
 		const previous = { data: this._configuration.toData(), workspace: this._extHostWorkspace.workspace };
-		this._configuration = Configuration.parse(data);
+		this._configuration = Configuration.parse(data, this._logService);
 		this._configurationScopes = this._toMap(data.configurationScopes);
 		this._onDidChangeConfiguration.fire(this._toConfigurationChangeEvent(change, previous));
 	}
 
 	getConfiguration(section?: string, scope?: vscode.ConfigurationScope | null, extensionDescription?: IExtensionDescription): vscode.WorkspaceConfiguration {
 		const overrides = scopeToOverrides(scope) || {};
-		const config = this._toReadonlyValue(section
-			? lookUp(this._configuration.getValue(undefined, overrides, this._extHostWorkspace.workspace), section)
-			: this._configuration.getValue(undefined, overrides, this._extHostWorkspace.workspace));
+		const config = this._toReadonlyValue(this._configuration.getValue(section, overrides, this._extHostWorkspace.workspace));
 
 		if (section) {
 			this._validateConfigurationAccess(section, overrides, extensionDescription?.identifier);
@@ -191,13 +193,13 @@ export class ExtHostConfigProvider {
 				} else {
 					let clonedConfig: any | undefined = undefined;
 					const cloneOnWriteProxy = (target: any, accessor: string): any => {
-						let clonedTarget: any | undefined = undefined;
-						const cloneTarget = () => {
-							clonedConfig = clonedConfig ? clonedConfig : deepClone(config);
-							clonedTarget = clonedTarget ? clonedTarget : lookUp(clonedConfig, accessor);
-						};
-						return isObject(target) ?
-							new Proxy(target, {
+						if (isObject(target)) {
+							let clonedTarget: any | undefined = undefined;
+							const cloneTarget = () => {
+								clonedConfig = clonedConfig ? clonedConfig : deepClone(config);
+								clonedTarget = clonedTarget ? clonedTarget : lookUp(clonedConfig, accessor);
+							};
+							return new Proxy(target, {
 								get: (target: any, property: PropertyKey) => {
 									if (typeof property === 'string' && property.toLowerCase() === 'tojson') {
 										cloneTarget();
@@ -234,13 +236,18 @@ export class ExtHostConfigProvider {
 									}
 									return true;
 								}
-							}) : target;
+							});
+						}
+						if (Array.isArray(target)) {
+							return deepClone(target);
+						}
+						return target;
 					};
 					result = cloneOnWriteProxy(result, key);
 				}
 				return result;
 			},
-			update: (key: string, value: any, extHostConfigurationTarget: ExtHostConfigurationTarget | boolean, scopeToLanguage?: boolean) => {
+			update: (key: string, value: unknown, extHostConfigurationTarget: ExtHostConfigurationTarget | boolean, scopeToLanguage?: boolean) => {
 				key = section ? `${section}.${key}` : key;
 				const target = parseConfigurationTarget(extHostConfigurationTarget);
 				if (value !== undefined) {
@@ -251,22 +258,26 @@ export class ExtHostConfigProvider {
 			},
 			inspect: <T>(key: string): ConfigurationInspect<T> | undefined => {
 				key = section ? `${section}.${key}` : key;
-				const config = deepClone(this._configuration.inspect<T>(key, overrides, this._extHostWorkspace.workspace));
+				const config = this._configuration.inspect<T>(key, overrides, this._extHostWorkspace.workspace);
 				if (config) {
 					return {
 						key,
 
-						defaultValue: config.default?.value,
-						globalValue: config.user?.value,
-						workspaceValue: config.workspace?.value,
-						workspaceFolderValue: config.workspaceFolder?.value,
+						defaultValue: deepClone(config.policy?.value ?? config.default?.value),
+						globalLocalValue: deepClone(config.userLocal?.value),
+						globalRemoteValue: deepClone(config.userRemote?.value),
+						globalValue: deepClone(config.user?.value ?? config.application?.value),
+						workspaceValue: deepClone(config.workspace?.value),
+						workspaceFolderValue: deepClone(config.workspaceFolder?.value),
 
-						defaultLanguageValue: config.default?.override,
-						globalLanguageValue: config.user?.override,
-						workspaceLanguageValue: config.workspace?.override,
-						workspaceFolderLanguageValue: config.workspaceFolder?.override,
+						defaultLanguageValue: deepClone(config.default?.override),
+						globalLocalLanguageValue: deepClone(config.userLocal?.override),
+						globalRemoteLanguageValue: deepClone(config.userRemote?.override),
+						globalLanguageValue: deepClone(config.user?.override ?? config.application?.override),
+						workspaceLanguageValue: deepClone(config.workspace?.override),
+						workspaceFolderLanguageValue: deepClone(config.workspaceFolder?.override),
 
-						languageIds: config.overrideIdentifiers
+						languageIds: deepClone(config.overrideIdentifiers)
 					};
 				}
 				return undefined;
@@ -277,7 +288,7 @@ export class ExtHostConfigProvider {
 			mixin(result, config, false);
 		}
 
-		return <vscode.WorkspaceConfiguration>Object.freeze(result);
+		return Object.freeze(result);
 	}
 
 	private _toReadonlyValue(result: any): any {
@@ -288,7 +299,7 @@ export class ExtHostConfigProvider {
 					set: (_target: any, property: PropertyKey, _value: any) => { throw new Error(`TypeError: Cannot assign to read only property '${String(property)}' of object`); },
 					deleteProperty: (_target: any, property: PropertyKey) => { throw new Error(`TypeError: Cannot delete read only property '${String(property)}' of object`); },
 					defineProperty: (_target: any, property: PropertyKey) => { throw new Error(`TypeError: Cannot define property '${String(property)}' for a readonly object`); },
-					setPrototypeOf: (_target: any) => { throw new Error(`TypeError: Cannot set prototype for a readonly object`); },
+					setPrototypeOf: (_target: unknown) => { throw new Error(`TypeError: Cannot set prototype for a readonly object`); },
 					isExtensible: () => false,
 					preventExtensions: () => true
 				}) : target;
@@ -297,7 +308,7 @@ export class ExtHostConfigProvider {
 	}
 
 	private _validateConfigurationAccess(key: string, overrides?: IConfigurationOverrides, extensionId?: ExtensionIdentifier): void {
-		const scope = OVERRIDE_PROPERTY_PATTERN.test(key) ? ConfigurationScope.RESOURCE : this._configurationScopes.get(key);
+		const scope = OVERRIDE_PROPERTY_REGEX.test(key) ? ConfigurationScope.RESOURCE : this._configurationScopes.get(key);
 		const extensionIdText = extensionId ? `[${extensionId.value}] ` : '';
 		if (ConfigurationScope.RESOURCE === scope) {
 			if (typeof overrides?.resource === 'undefined') {
@@ -313,8 +324,8 @@ export class ExtHostConfigProvider {
 		}
 	}
 
-	private _toConfigurationChangeEvent(change: IConfigurationChange, previous: { data: IConfigurationData, workspace: Workspace | undefined }): vscode.ConfigurationChangeEvent {
-		const event = new ConfigurationChangeEvent(change, previous, this._configuration, this._extHostWorkspace.workspace);
+	private _toConfigurationChangeEvent(change: IConfigurationChange, previous: { data: IConfigurationData; workspace: Workspace | undefined }): vscode.ConfigurationChangeEvent {
+		const event = new ConfigurationChangeEvent(change, previous, this._configuration, this._extHostWorkspace.workspace, this._logService);
 		return Object.freeze({
 			affectsConfiguration: (section: string, scope?: vscode.ConfigurationScope) => event.affectsConfiguration(section, scopeToOverrides(scope))
 		});

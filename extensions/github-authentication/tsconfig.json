@@ -2,12 +2,17 @@
 	"extends": "../tsconfig.base.json",
 	"compilerOptions": {
 		"outDir": "./out",
-		"experimentalDecorators": true,
 		"typeRoots": [
 			"./node_modules/@types"
+		],
+		"lib": [
+			"WebWorker"
 		]
 	},
 	"include": [
-		"src/**/*"
+		"src/**/*",
+		"../../src/vscode-dts/vscode.d.ts",
+		"../../src/vscode-dts/vscode.proposed.authIssuers.d.ts",
+		"../../src/vscode-dts/vscode.proposed.authProviderSpecific.d.ts"
 	]
 }

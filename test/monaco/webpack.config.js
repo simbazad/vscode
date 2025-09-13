@@ -4,12 +4,13 @@
  *--------------------------------------------------------------------------------------------*/
 
 const path = require('path');
+const WarningsToErrorsPlugin = require('warnings-to-errors-webpack-plugin');
 
 module.exports = {
 	mode: 'production',
 	entry: {
-		"core": './core.js',
-		"editor.worker": '../../out-monaco-editor-core/esm/vs/editor/editor.worker.js',
+		'core': './core.js',
+		'editorWebWorkerMain': '../../out-monaco-editor-core/esm/vs/editor/common/services/editorWebWorkerMain.js',
 	},
 	output: {
 		globalObject: 'self',
@@ -38,7 +39,6 @@ module.exports = {
 	},
 	resolve: {
 		alias: {
-			'monaco-editor-core/esm/vs/editor/editor.worker': path.resolve(__dirname, '../../out-monaco-editor-core/esm/vs/editor/editor.worker.js'),
 			'monaco-editor-core': path.resolve(__dirname, '../../out-monaco-editor-core/esm/vs/editor/editor.main.js'),
 		}
 	},
@@ -51,5 +51,12 @@ module.exports = {
 		moduleTrace: true,
 		errorDetails: true,
 		chunks: true
-	}
+	},
+	plugins: [
+		new WarningsToErrorsPlugin()
+	],
+	optimization: {
+		// Without it, CI fails, which indicates a webpack minification bug.
+		minimize: false,
+	},
 };
